@@ -1,0 +1,38 @@
+<resources>
+    <string name="app_name">Nocturne</string>
+    <string name="app_description">Masks the system clock during sleep hours, so you can rest without watching the time.</string>
+
+    <!-- Home card -->
+    <string name="hero_title">Clock hidden during sleep hours</string>
+    <string name="backend_connected">Framework: connected (remote preferences)</string>
+    <string name="backend_local">Framework: disconnected, changes saved locally (select the module in LSPosed first)</string>
+    <string name="backend_uninitialized">Framework: configuration not initialized</string>
+
+    <!-- Section titles -->
+    <string name="section_trigger">Trigger rules</string>
+    <string name="section_manual_override">Manual override</string>
+
+    <!-- Trigger settings -->
+    <string name="setting_enabled">Enable Nocturne (master switch)</string>
+    <string name="setting_schedule">Fixed-time masking</string>
+    <string name="time_start">Start time</string>
+    <string name="time_end">End time</string>
+    <string name="setting_link_dnd">Link with Do Not Disturb</string>
+
+    <!-- Manual override options -->
+    <string name="override_auto">Automatic (schedule / DND)</string>
+    <string name="override_on">Force hide</string>
+    <string name="override_off">Force show</string>
+
+    <!-- Hints and messages -->
+    <string name="info_placeholder">Placeholder: moon and star symbols (☾/✦, changes every minute)</string>
+    <string name="error_time_format">Time must be in HH:mm format, e.g. 23:00</string>
+    <string name="save_success">Saved. Changes take effect in target processes immediately.</string>
+    <string name="save_failed">Save failed (config backend not ready)</string>
+
+    <!-- Actions -->
+    <string name="action_save">Save</string>
+    <string name="time_picker_title">Select time</string>
+    <string name="action_confirm">OK</string>
+    <string name="action_cancel">Cancel</string>
+</resources>

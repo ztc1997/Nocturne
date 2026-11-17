@@ -1,0 +1,13 @@
+# Add project specific R8 rules here.
+# AGP will combine all keep rule files in src/main/keepRules to pass to R8
+
+# ---- 现代 Xposed API（libxposed API 102）----
+# api 上的 @SinceApi / @InternalApi 是 CLASS retention，运行期不需要，别告警。
+-dontwarn io.github.libxposed.annotation.**
+
+# 入口类名写在 META-INF/xposed/java_init.list 里，框架按类名反射实例化。
+# 入口类就一个，直接保留原名（不混淆），比依靠 adaptresourcefilecontents
+# 改写资源里的类名更稳；体积代价可忽略。
+-keep class com.ztc1997.nocturne.hook.NocturneModule {
+    public <init>();
+}

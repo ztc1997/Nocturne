@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- MD3 窗口底色：与 Compose 主题的 surface 对应，避免启动闪白。 -->
+    <color name="md3_surface_light">#FFFDF7FF</color>
+    <color name="md3_surface_dark">#FF16121F</color>
+</resources>

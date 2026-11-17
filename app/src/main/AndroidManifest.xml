@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      现代 API（API 102）模块：模块名 / 描述取自 android:label / android:description。
+      注意：manifest 里绝对不能出现 xposedminversion / xposedmodule /
+      xposedsharedprefs / xposedscope / xposeddescription 这些 legacy meta-data，
+      否则 LSPosed 会当成 legacy 模块去找 assets/xposed_init，导致静默不加载。
+    -->
+    <application
+        android:name=".appconfig.NocturneApp"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:description="@string/app_description"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Nocturne">
+
+        <activity
+            android:name=".appconfig.MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>

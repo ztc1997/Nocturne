@@ -1,0 +1,18 @@
+# 夜曲 Nocturne —— 现代 Xposed API（libxposed）模块属性
+#
+# 位于 META-INF/xposed/module.prop。LSPosed 靠 java_init.list 的存在判定
+# 「这是一个现代 API 模块」，并读取这里的最低/目标 API 版本。
+
+# 框架需实现 Xposed API 102。
+minApiVersion=102
+targetApiVersion=102
+
+# staticScope=false：不强制锁定作用域，允许在 LSPosed 里按需勾选。
+# 初期候选包见 scope.list（SystemUI / 启动器 / 锁屏 / AOD）。
+staticScope=false
+
+# hook 回调抛异常时走保护模式，不把 SystemUI 带崩。
+exceptionMode=protective
+
+# 模块 App 升级后自动热重载，无需重启目标进程。
+autoHotReload=true
