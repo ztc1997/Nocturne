@@ -28,6 +28,7 @@
     <string name="info_placeholder">占位符：星月图案（☾/✦，每分钟随机变化）</string>
     <string name="error_time_format">时段格式应为 HH:mm，例如 23:00</string>
     <string name="save_success">已保存，目标进程即时生效</string>
+    <string name="save_pending">已暂存本地，LSPosed 连接后自动同步</string>
     <string name="save_failed">保存失败（配置后端未就绪）</string>
 
     <!-- 操作 -->

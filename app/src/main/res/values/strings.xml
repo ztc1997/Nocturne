@@ -28,6 +28,7 @@
     <string name="info_placeholder">Placeholder: moon and star symbols (☾/✦, changes every minute)</string>
     <string name="error_time_format">Time must be in HH:mm format, e.g. 23:00</string>
     <string name="save_success">Saved. Changes take effect in target processes immediately.</string>
+    <string name="save_pending">Saved locally. It syncs to the framework once LSPosed connects.</string>
     <string name="save_failed">Save failed (config backend not ready)</string>
 
     <!-- Actions -->

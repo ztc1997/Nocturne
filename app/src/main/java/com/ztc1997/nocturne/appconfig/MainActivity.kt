@@ -1,6 +1,8 @@
 package com.ztc1997.nocturne.appconfig
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
@@ -36,7 +38,6 @@ import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,6 +49,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.ztc1997.nocturne.R
 import com.ztc1997.nocturne.core.ConfigKeys
+import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.SleepWindow
 import kotlinx.coroutines.launch
 
@@ -71,51 +73,74 @@ private val OVERRIDE_OPTIONS = listOf(
     OverrideOption(R.string.override_off, ConfigKeys.OVERRIDE_OFF),
 )
 
+/**
+ * 设置页的表单状态。
+ *
+ * 界面值不能在组合期"读一次就记住"：框架的 binder 是异步注入的，
+ * 首帧往往早于连接，那时读到的是本地镜像（首次安装就是空文件 → 默认值）。
+ * 连接/推送到来时必须重新读，否则界面永远停在默认参数上。
+ *
+ * 反过来，用户已经在界面上改过东西（[dirty]）时不能被后台值覆盖，
+ * 否则刚拨好的开关会在配置推送到达的一瞬间被打回去。
+ */
+private class SettingsForm(initial: ConfigSnapshot) {
+    var values by mutableStateOf(initial)
+        private set
+    var dirty by mutableStateOf(false)
+        private set
+    var backend by mutableStateOf(ModulePreferences.backend())
+        private set
+
+    fun mutate(transform: (ConfigSnapshot) -> ConfigSnapshot) {
+        values = transform(values)
+        dirty = true
+    }
+
+    /** 保存成功后：以存储中的值为准（暂存本地时也与远端最终值一致），恢复跟随。 */
+    fun onSaved() {
+        dirty = false
+        values = ModulePreferences.load()
+        backend = ModulePreferences.backend()
+    }
+
+    /** 配置源变化（后端连接/断开、远端推送）：只在用户没动手时刷新界面。 */
+    fun refresh() {
+        backend = ModulePreferences.backend()
+        if (!dirty) values = ModulePreferences.load()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScreen() {
-    var enabled by remember {
-        mutableStateOf(ModulePreferences.getBoolean(ConfigKeys.ENABLED, ConfigKeys.DEFAULT_ENABLED))
-    }
-    var scheduleEnabled by remember {
-        mutableStateOf(
-            ModulePreferences.getBoolean(
-                ConfigKeys.SCHEDULE_ENABLED, ConfigKeys.DEFAULT_SCHEDULE_ENABLED,
-            ),
-        )
-    }
-    var start by remember {
-        mutableStateOf(
-            ModulePreferences.getString(ConfigKeys.WINDOW_START, ConfigKeys.DEFAULT_WINDOW_START),
-        )
-    }
-    var end by remember {
-        mutableStateOf(
-            ModulePreferences.getString(ConfigKeys.WINDOW_END, ConfigKeys.DEFAULT_WINDOW_END),
-        )
-    }
-    var linkDnd by remember {
-        mutableStateOf(ModulePreferences.getBoolean(ConfigKeys.LINK_DND, ConfigKeys.DEFAULT_LINK_DND))
-    }
-    var override by remember {
-        mutableIntStateOf(ModulePreferences.getInt(ConfigKeys.MANUAL_OVERRIDE, ConfigKeys.OVERRIDE_AUTO))
-    }
-    var backendRes by remember { mutableIntStateOf(backendStatusRes()) }
+    val form = remember { SettingsForm(ModulePreferences.load()) }
     var showStartPicker by remember { mutableStateOf(false) }
     var showEndPicker by remember { mutableStateOf(false) }
 
     // 观察者必须用同一个引用，保证 observe / unobserve 成对。
+    // 回调可能来自 binder 线程（框架推送），统一切主线程再改 Compose 状态。
     DisposableEffect(Unit) {
-        val observer: () -> Unit = { backendRes = backendStatusRes() }
+        val mainHandler = Handler(Looper.getMainLooper())
+        val observer: () -> Unit = {
+            if (Looper.myLooper() === mainHandler.looper) {
+                form.refresh()
+            } else {
+                mainHandler.post { form.refresh() }
+            }
+        }
         ModulePreferences.observe(observer)
         onDispose { ModulePreferences.unobserve(observer) }
     }
+
+    val values = form.values
+    val backendRes = backendStatusRes(form.backend)
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     // 点击回调不是 Composable 上下文，提前把文案解析好。
     val invalidTimeMessage = stringResource(R.string.error_time_format)
     val savedMessage = stringResource(R.string.save_success)
+    val pendingMessage = stringResource(R.string.save_pending)
     val saveFailedMessage = stringResource(R.string.save_failed)
 
     fun showSnackbar(message: String) {
@@ -149,13 +174,13 @@ private fun SettingsScreen() {
                 SettingsCard {
                     SettingSwitchRow(
                         headline = stringResource(R.string.setting_enabled),
-                        checked = enabled,
-                        onCheckedChange = { enabled = it },
+                        checked = values.enabled,
+                        onCheckedChange = { on -> form.mutate { it.copy(enabled = on) } },
                     )
                     SettingSwitchRow(
                         headline = stringResource(R.string.setting_schedule),
-                        checked = scheduleEnabled,
-                        onCheckedChange = { scheduleEnabled = it },
+                        checked = values.scheduleEnabled,
+                        onCheckedChange = { on -> form.mutate { it.copy(scheduleEnabled = on) } },
                     )
                     Row(
                         modifier = Modifier
@@ -165,21 +190,21 @@ private fun SettingsScreen() {
                     ) {
                         TimeField(
                             label = stringResource(R.string.time_start),
-                            value = start,
+                            value = values.windowStart,
                             onClick = { showStartPicker = true },
                             modifier = Modifier.weight(1f),
                         )
                         TimeField(
                             label = stringResource(R.string.time_end),
-                            value = end,
+                            value = values.windowEnd,
                             onClick = { showEndPicker = true },
                             modifier = Modifier.weight(1f),
                         )
                     }
                     SettingSwitchRow(
                         headline = stringResource(R.string.setting_link_dnd),
-                        checked = linkDnd,
-                        onCheckedChange = { linkDnd = it },
+                        checked = values.linkDnd,
+                        onCheckedChange = { on -> form.mutate { it.copy(linkDnd = on) } },
                     )
                 }
             }
@@ -191,14 +216,16 @@ private fun SettingsScreen() {
                             headlineContent = { Text(stringResource(option.labelRes)) },
                             leadingContent = {
                                 RadioButton(
-                                    selected = override == option.value,
+                                    selected = values.manualOverride == option.value,
                                     onClick = null,
                                 )
                             },
                             colors = ListItemDefaults.colors(
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                             ),
-                            modifier = Modifier.clickable { override = option.value },
+                            modifier = Modifier.clickable {
+                                form.mutate { it.copy(manualOverride = option.value) }
+                            },
                         )
                     }
                 }
@@ -209,19 +236,30 @@ private fun SettingsScreen() {
             item {
                 Button(
                     onClick = {
-                        if (SleepWindow.parseHhMm(start) == null || SleepWindow.parseHhMm(end) == null) {
+                        val snapshot = form.values
+                        if (SleepWindow.parseHhMm(snapshot.windowStart) == null ||
+                            SleepWindow.parseHhMm(snapshot.windowEnd) == null
+                        ) {
                             showSnackbar(invalidTimeMessage)
                             return@Button
                         }
                         val ok = ModulePreferences.edit {
-                            putBoolean(ConfigKeys.ENABLED, enabled)
-                            putBoolean(ConfigKeys.SCHEDULE_ENABLED, scheduleEnabled)
-                            putString(ConfigKeys.WINDOW_START, start)
-                            putString(ConfigKeys.WINDOW_END, end)
-                            putBoolean(ConfigKeys.LINK_DND, linkDnd)
-                            putInt(ConfigKeys.MANUAL_OVERRIDE, override)
+                            putBoolean(ConfigKeys.ENABLED, snapshot.enabled)
+                            putBoolean(ConfigKeys.SCHEDULE_ENABLED, snapshot.scheduleEnabled)
+                            putString(ConfigKeys.WINDOW_START, snapshot.windowStart)
+                            putString(ConfigKeys.WINDOW_END, snapshot.windowEnd)
+                            putBoolean(ConfigKeys.LINK_DND, snapshot.linkDnd)
+                            putInt(ConfigKeys.MANUAL_OVERRIDE, snapshot.manualOverride)
                         }
-                        showSnackbar(if (ok) savedMessage else saveFailedMessage)
+                        if (ok) form.onSaved()
+                        showSnackbar(
+                            when {
+                                !ok -> saveFailedMessage
+                                // 框架还没连上：值已暂存本地，连接后自动补写远端
+                                ModulePreferences.backend() != ModulePreferences.Backend.REMOTE -> pendingMessage
+                                else -> savedMessage
+                            },
+                        )
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -233,17 +271,17 @@ private fun SettingsScreen() {
 
     if (showStartPicker) {
         TimeSelectionDialog(
-            initialValue = start,
+            initialValue = values.windowStart,
             fallbackValue = ConfigKeys.DEFAULT_WINDOW_START,
-            onConfirm = { start = it },
+            onConfirm = { picked -> form.mutate { it.copy(windowStart = picked) } },
             onDismiss = { showStartPicker = false },
         )
     }
     if (showEndPicker) {
         TimeSelectionDialog(
-            initialValue = end,
+            initialValue = values.windowEnd,
             fallbackValue = ConfigKeys.DEFAULT_WINDOW_END,
-            onConfirm = { end = it },
+            onConfirm = { picked -> form.mutate { it.copy(windowEnd = picked) } },
             onDismiss = { showEndPicker = false },
         )
     }
@@ -321,7 +359,7 @@ private fun TimeSelectionDialog(
     }
 }
 
-private fun backendStatusRes(): Int = when (ModulePreferences.backend()) {
+private fun backendStatusRes(backend: ModulePreferences.Backend): Int = when (backend) {
     ModulePreferences.Backend.REMOTE -> R.string.backend_connected
     ModulePreferences.Backend.LOCAL -> R.string.backend_local
     ModulePreferences.Backend.NONE -> R.string.backend_uninitialized

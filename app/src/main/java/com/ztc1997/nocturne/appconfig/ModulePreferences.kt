@@ -3,13 +3,20 @@ package com.ztc1997.nocturne.appconfig
 import android.content.Context
 import android.content.SharedPreferences
 import com.ztc1997.nocturne.core.ConfigKeys
+import com.ztc1997.nocturne.core.ConfigSnapshot
+import com.ztc1997.nocturne.core.PendingWrite
 
 /**
  * 模块 App 侧配置仓库。两个后端：
  *  - REMOTE：XposedService.getRemotePreferences(group)，框架托管，写进去
  *    目标进程立刻能看到并收到推送。正常状态的唯一真实来源。
- *  - LOCAL：模块自己的 SharedPreferences，仅在框架未连接（还没在 LSPosed
- *    里勾选）时兜底；框架一连接，本地值一次性迁移到远端。
+ *  - LOCAL：模块自己的 SharedPreferences，两个用途：
+ *      1) 镜像：写远端成功的键顺手抄一份，框架还没连上时先用它顶上。
+ *         框架注入 binder 是异步的（daemon 反向调用 XposedProvider），
+ *         release 包启动快、首帧常常赶在绑定之前，只能从空的本地文件读到
+ *         默认值——这就是"强杀后设置页永远是默认参数"的来源。
+ *      2) 暂存：框架未连接时的写入，记下键名，连接后补写进远端。
+ *         否则那次写入会被永久丢在本地，远端旧值继续生效。
  *
  * 本类不引用任何 io.github.libxposed.api 类型（只引用 service，后者会打包），
  * 可安全在模块 App 进程加载。
@@ -18,12 +25,13 @@ object ModulePreferences {
 
     enum class Backend { REMOTE, LOCAL, NONE }
 
+    /** 本地暂存待补写到远端的键（StringSet，只存在于本地文件；不写进远端分组） */
+    private const val PENDING_KEY = "__nocturne_pending"
+
     private var local: SharedPreferences? = null
     @Volatile private var remote: SharedPreferences? = null
     @Volatile private var initialized = false
     private val listeners = mutableListOf<() -> Unit>()
-
-    private const val MIGRATED_KEY = "__nocturne_migrated"
 
     private val changeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         notifyChanged()
@@ -41,35 +49,74 @@ object ModulePreferences {
                 rp?.registerOnSharedPreferenceChangeListener(changeListener)
                 remote = rp
             }
-            if (rp != null) migrateLocalToRemote(rp)
+            if (rp != null) flushPending(rp)
             notifyChanged()
         }
         initialized = true
     }
 
-    /** 首次连接时把本地暂存的配置补写进远端（远端已有的键保持权威，不覆盖）。 */
-    private fun migrateLocalToRemote(rp: SharedPreferences) {
+    /**
+     * 把框架未连接时暂存在本地的键补写进远端。
+     *
+     * 这类键是用户在界面上刚改完保存的，属于最新意图，**覆盖**远端旧值；
+     * 而单纯的历史镜像值不在此列（只在 [mirrorToLocal] 里躺着，不会被回灌）。
+     */
+    private fun flushPending(rp: SharedPreferences) {
         val lp = local ?: return
-        val localAll = lp.all
-        if (localAll.isEmpty()) return
-        if ((localAll[MIGRATED_KEY] as? Boolean) == true) return
-        val remoteAll = runCatching { rp.all }.getOrNull() ?: return
-        val missing = localAll.filterKeys { it in ConfigKeys.ALL_KEYS && it !in remoteAll }
-        if (missing.isEmpty()) {
-            lp.edit().putBoolean(MIGRATED_KEY, true).apply()
+        val pending = runCatching { lp.getStringSet(PENDING_KEY, emptySet()) }.getOrNull().orEmpty()
+        if (pending.isEmpty()) return
+
+        val stored = runCatching { lp.all }.getOrNull().orEmpty()
+        val toWrite = PendingWrite.plan(pending, stored)
+        if (toWrite.isEmpty()) {
+            clearPending(lp)
             return
         }
-        runCatching {
+        val ok = runCatching {
             val e = rp.edit()
-            for ((k, v) in missing) {
-                when (v) {
-                    is Boolean -> e.putBoolean(k, v)
-                    is Int -> e.putInt(k, v)
-                    is String -> e.putString(k, v)
+            for ((key, value) in toWrite) {
+                when (value) {
+                    is Boolean -> e.putBoolean(key, value)
+                    is Int -> e.putInt(key, value)
+                    is String -> e.putString(key, value)
                 }
             }
             e.commit()
-            lp.edit().putBoolean(MIGRATED_KEY, true).commit()
+        }.getOrDefault(false)
+        // 写失败（例如服务刚好断开）就留住 pending，下次连接再补
+        if (ok) clearPending(lp)
+    }
+
+    private fun markPending(keys: Collection<String>) {
+        val lp = local ?: return
+        val valid = keys.filter { it in ConfigKeys.ALL_KEYS }
+        if (valid.isEmpty()) return
+        runCatching {
+            val existing = lp.getStringSet(PENDING_KEY, emptySet()).orEmpty()
+            lp.edit().putStringSet(PENDING_KEY, existing + valid).commit()
+        }
+    }
+
+    private fun clearPending(lp: SharedPreferences) {
+        runCatching { lp.edit().remove(PENDING_KEY).commit() }
+    }
+
+    /** 写远端成功后抄一份到本地：冷启动框架未就绪时界面先用它顶，不闪默认值。 */
+    private fun mirrorToLocal(ops: Map<String, Any?>) {
+        val lp = local ?: return
+        val cache = ops.filterKeys { it in ConfigKeys.ALL_KEYS }
+        if (cache.isEmpty()) return
+        runCatching {
+            val e = lp.edit()
+            for ((key, value) in cache) {
+                when (value) {
+                    null -> e.remove(key)
+                    is Boolean -> e.putBoolean(key, value)
+                    is Int -> e.putInt(key, value)
+                    is String -> e.putString(key, value)
+                }
+            }
+            e.commit()
         }
     }
 
@@ -81,31 +128,84 @@ object ModulePreferences {
         else -> Backend.NONE
     }
 
-    fun getBoolean(key: String, def: Boolean): Boolean =
-        runCatching { active()?.getBoolean(key, def) ?: def }.getOrDefault(def)
-
-    fun getInt(key: String, def: Int): Int =
-        runCatching { active()?.getInt(key, def) ?: def }.getOrDefault(def)
-
-    fun getString(key: String, def: String): String =
-        runCatching { active()?.getString(key, def) ?: def }.getOrDefault(def)
+    /** 当前生效配置的一份快照；后端未就绪时给默认值。 */
+    fun load(): ConfigSnapshot {
+        val p = active() ?: return ConfigSnapshot.DEFAULT
+        return runCatching {
+            ConfigSnapshot(
+                enabled = p.getBoolean(ConfigKeys.ENABLED, ConfigKeys.DEFAULT_ENABLED),
+                scheduleEnabled = p.getBoolean(
+                    ConfigKeys.SCHEDULE_ENABLED, ConfigKeys.DEFAULT_SCHEDULE_ENABLED,
+                ),
+                windowStart = p.getString(ConfigKeys.WINDOW_START, ConfigKeys.DEFAULT_WINDOW_START)
+                    ?: ConfigKeys.DEFAULT_WINDOW_START,
+                windowEnd = p.getString(ConfigKeys.WINDOW_END, ConfigKeys.DEFAULT_WINDOW_END)
+                    ?: ConfigKeys.DEFAULT_WINDOW_END,
+                linkDnd = p.getBoolean(ConfigKeys.LINK_DND, ConfigKeys.DEFAULT_LINK_DND),
+                manualOverride = p.getInt(ConfigKeys.MANUAL_OVERRIDE, ConfigKeys.OVERRIDE_AUTO),
+                logLevel = p.getInt(ConfigKeys.LOG_LEVEL, ConfigKeys.DEFAULT_LOG_LEVEL),
+            )
+        }.getOrDefault(ConfigSnapshot.DEFAULT)
+    }
 
     /** 写入配置（远端优先），返回是否成功。 */
-    fun edit(block: SharedPreferences.Editor.() -> Unit): Boolean {
+    fun edit(block: EditorScope.() -> Unit): Boolean {
         val target = active() ?: return false
         return runCatching {
-            val e = target.edit()
-            e.block()
-            e.commit()
+            val scope = EditorScope(target.edit())
+            scope.block()
+            val ok = scope.commit()
+            if (ok) {
+                if (target === remote) mirrorToLocal(scope.ops) else markPending(scope.ops.keys)
+            }
+            ok
         }.getOrDefault(false)
     }
 
-    fun observe(l: () -> Unit) { listeners.add(l) }
-    fun unobserve(l: () -> Unit) { listeners.remove(l) }
+    fun observe(l: () -> Unit) {
+        synchronized(listeners) { listeners.add(l) }
+    }
 
+    fun unobserve(l: () -> Unit) {
+        synchronized(listeners) { listeners.remove(l) }
+    }
+
+    /** 可能来自 binder 线程（框架推送配置），调用方自行切主线程。 */
     private fun notifyChanged() {
-        for (l in listeners.toList()) {
+        val snapshot = synchronized(listeners) { listeners.toList() }
+        for (l in snapshot) {
             runCatching { l() }
         }
+    }
+
+    /**
+     * 写入作用域：转发给真实的 Editor，同时记下写了哪些键——
+     * 远端成功要镜像到本地，本地暂存要登记待补写。
+     */
+    class EditorScope internal constructor(private val delegate: SharedPreferences.Editor) {
+
+        internal val ops = LinkedHashMap<String, Any?>()
+
+        fun putBoolean(key: String, value: Boolean) {
+            delegate.putBoolean(key, value)
+            ops[key] = value
+        }
+
+        fun putInt(key: String, value: Int) {
+            delegate.putInt(key, value)
+            ops[key] = value
+        }
+
+        fun putString(key: String, value: String?) {
+            delegate.putString(key, value)
+            ops[key] = value
+        }
+
+        fun remove(key: String) {
+            delegate.remove(key)
+            ops[key] = null
+        }
+
+        internal fun commit(): Boolean = delegate.commit()
     }
 }

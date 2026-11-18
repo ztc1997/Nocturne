@@ -29,6 +29,9 @@ object FrameworkBridge {
 
     private val listeners = mutableListOf<Listener>()
 
+    /** listeners 会被主线程（注册）与 binder 线程（绑定/断开）同时碰，统一加锁拷贝。 */
+    private val lock = Any()
+
     /** 幂等；在 Application.onCreate 里调用。 */
     fun init() {
         if (registered) return
@@ -58,12 +61,15 @@ object FrameworkBridge {
     }
 
     fun addListener(l: Listener) {
-        listeners.add(l)
+        synchronized(lock) { listeners.add(l) }
+        // 注册即同步当前状态：连接可能早于注册（provider 的 binder 先到）
         l.onServiceChanged(service)
     }
 
     private fun notifyListeners(svc: XposedService?) {
-        for (l in listeners.toList()) {
+        // 锁只保护列表拷贝；回调里会跨进程读配置，不能持锁调用
+        val snapshot = synchronized(lock) { listeners.toList() }
+        for (l in snapshot) {
             runCatching { l.onServiceChanged(svc) }
                 .onFailure { GLog.w("服务状态回调异常", it) }
         }
