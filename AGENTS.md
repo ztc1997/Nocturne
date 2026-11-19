@@ -71,6 +71,23 @@ ColorOS 17 时钟渲染分两套，都要拦：
      命中时 `chain.proceed(arrayOf("-"))` 保留原方法副作用
    - 安装时机：宿主 Application 创建后（Instrumentation.callApplicationOnCreate
      钩子）+ 状态栏钩子首次回调兜底；`onPackageReady` 时 Application 往往未 attach
+3. **主题模板引擎自绘**（第三方主题的锁屏 + AOD，2026-11-19 真机取证）：
+   - 锁屏 `keyguard_plugin_container` 的实例就是 `KeyguardEngineContainer`
+     → VariUIEngine 的 `com.zplus.engine.lk_view.TimeView`：数字是 0-9 Bitmap，
+     `draw(Canvas)` 里按 `getHourText()`/`getMinuteText()` 取位图逐位 `drawBitmap`
+   - AOD 走 EGView 的 `com.oplus.egview.widget.TimeView`：垂直两行「时 / 分」，
+     `onDraw` + `canvas.drawText`
+   - **这套引擎自己遍历子元素直接调 `view.draw(canvas)`，不经
+     `ViewGroup.dispatchDraw`，所以 `visibility=INVISIBLE` 和 `alpha=0` 一律无效**
+     （真机两次实测：两个属性都设了，画面照旧）。唯一入口是绘制方法本身：
+     睡眠时 `intercept` 返回 null，跳过整段绘制
+   - 引擎类在 VariUIEngine（`com.oplus.uiengine`）自己的 ClassLoader 里，宿主 CL
+     找不到；且 `install()` 执行时 `currentAppContext()` 仍为 null。所以由 20s
+     自检节拍补装，`ActivityThread.getSystemContext()` 兜底
+   - **只在 SystemUI 进程挂**：launcher 的时钟走 personality 的星月占位，
+     一并拦会把桌面时钟变成空白
+   - 日期类（`DateTimeView` / `DateView` / `LunarView`）放行——用户要的是
+     「不显示时间」，日期与电量保持原样
 
 ### 血泪教训（勿重蹈）
 
@@ -78,6 +95,10 @@ ColorOS 17 时钟渲染分两套，都要拦：
   `xposed.hook()` 会触发框架类加载重入，真机实测直接把 LSPosed 打进安全模式
 - 桌面时钟不要用"遍历 View 树写文本"的钩子（已删除 installDesktop）——与源头
   参数替换交替覆盖，会导致桌面在两种占位样式间跳动
+- **`KeyguardEngineContainer` 整层 `alpha=0` 副作用极大**：它是整个主题锁屏
+  壁纸层，连清晰壁纸底图和手电筒/相机快捷按钮一起抹掉，屏上只剩模糊壁纸
+- **改完 APK 连杀几次 SystemUI 后，LSPosed 可能不再注入新进程**（日志停在被杀
+  那一刻）。此时 `killall` 无效，必须 `adb reboot` 恢复——不要误判成代码问题
 - RETURN_VALUE 模式永不跳过 `chain.proceed()`
 - **模块 App 侧配置不要在组合期"读一次就记住"**：框架 binder 由 daemon 反向
   调用 `XposedProvider` 异步注入，release 包启动快，首帧常常赶在连接之前，
