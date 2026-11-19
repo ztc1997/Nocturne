@@ -145,7 +145,7 @@ class HostClockHider(
             if (it.isAttachedToWindow && n > 0) return it
         }
         var best: View? = null
-        var bestCount = -1
+        var bestScore = -1
         for (root in windowRoots()) {
             val id = runCatching {
                 root.context.resources.getIdentifier(
@@ -163,15 +163,22 @@ class HostClockHider(
                         " shown=${v.isShown} attached=${v.isAttachedToWindow}",
                 )
             }
-            if (n > bestCount) {
-                bestCount = n
+            // 一定要挑「已附着且可见」的那份：Theme 预览会另外造一份 0×0 的
+            // 离屏容器，按子节点数取最大会选中它（真机踩过：dump 出来的整棵树
+            // rect 全是 0,0，看不到屏幕上真正在画的那个实例）。
+            val score = (if (v.isAttachedToWindow) 2 else 0) + (if (v.isShown) 1 else 0)
+            if (score > bestScore || (score == bestScore && n > 0)) {
+                bestScore = score
                 best = v
             }
         }
         locateLogged = true
-        if (best != null && bestCount > 0) {
+        if (best != null && bestScore >= 0) {
             pluginContainer = best
-            GLog.i("采用锁屏容器：${best.javaClass.name} 子节点数=$bestCount")
+            GLog.i(
+                "采用锁屏容器：${best.javaClass.name} 子节点数=" +
+                    "${(best as? android.view.ViewGroup)?.childCount} attached=${best.isAttachedToWindow}",
+            )
         }
         return pluginContainer
     }
@@ -216,8 +223,15 @@ class HostClockHider(
                                     val self = chain.thisObject as? View
                                     val canvas = chain.args.getOrNull(0) as? android.graphics.Canvas
                                     if (kind != null && self != null && canvas != null) {
-                                        // 画不出来也保持空白：绝不回落成真实时间。
-                                        EngineClockPainter.draw(kind, canvas, self)
+                                        val painted = EngineClockPainter.draw(kind, canvas, self)
+                                        if (painted) return@intercept null
+                                        // 这两类是「通用容器」，绝大多数实例不是时间：
+                                        // 取不到数字就放行原绘制，否则整屏主题元素都会被抹掉。
+                                        if (kind == EngineClockPainter.Kind.ZPLUS_IMAGE_NUMBER ||
+                                            kind == EngineClockPainter.Kind.ZPLUS_IMAGE_ELEMENT
+                                        ) {
+                                            return@intercept chain.proceed()
+                                        }
                                     }
                                     null
                                 },
@@ -296,6 +310,45 @@ class HostClockHider(
             containerLogged = true
             GLog.i("锁屏引擎容器就绪：${c.javaClass.simpleName} 子节点数=${(c as? android.view.ViewGroup)?.childCount}")
         }
+        dumpPluginTree(c)
+    }
+
+    /** 诊断用：已经打印过结构的容器。 */
+    private val notedTrees = java.util.Collections.synchronizedSet(mutableSetOf<Int>())
+
+    /**
+     * 诊断：把锁屏插件容器下的控件树按**真实类名**打出来。
+     *
+     * 为什么需要（2026-11-19 换机后锁屏时间没被屏蔽）：uiautomator dump 会把这些
+     * 自定义容器的类名统一报成 `android.widget.FrameLayout`
+     * （`getAccessibilityClassName` 被覆写），静态也只能猜到候选类。只有在本进程
+     * 里读 `javaClass.name` 才能确认屏幕上那串数字到底由哪个类的哪个 View 画。
+     */
+    private fun dumpPluginTree(container: View) {
+        if (!GLog.isDebug || !shouldMask()) return
+        if (!container.isAttachedToWindow) return
+        if (!notedTrees.add(System.identityHashCode(container))) return
+        val lines = ArrayList<String>(128)
+        val loaderHashes = HashMap<String, Int>()
+        var budget = 120
+        fun walk(v: View, depth: Int) {
+            if (budget <= 0 || depth > 7) return
+            budget--
+            val rect = android.graphics.Rect()
+            runCatching { v.getGlobalVisibleRect(rect) }
+            val name = v.javaClass.name
+            val loader = loaderHashes.getOrPut(name) {
+                System.identityHashCode(v.javaClass.classLoader)
+            }
+            lines.add(
+                "  ".repeat(depth) + name +
+                    " rect=$rect shown=${v.isShown} alpha=${v.alpha} cl=$loader",
+            )
+            val g = v as? android.view.ViewGroup ?: return
+            for (i in 0 until g.childCount) walk(g.getChildAt(i), depth + 1)
+        }
+        walk(container, 0)
+        GLog.i("[锁屏树]\n" + lines.joinToString("\n"))
     }
 
 
@@ -464,8 +517,10 @@ class HostClockHider(
          * `LunarView` 一律放行，锁屏/AOD 上的「11月19日 星期四」保持原样。
          */
         private val ENGINE_CLOCK_CLASSES = arrayOf(
-            EngineClockPainter.ZPLUS_CLASS,   // 锁屏：0-9 位图
+            EngineClockPainter.ZPLUS_CLASS,   // 锁屏：0-9 位图（旧模板）
             EngineClockPainter.EG_CLASS,      // AOD：两行 drawText
+            EngineClockPainter.ZPLUS_IMAGE_NUMBER_CLASS,   // 模板数字元素（表达式 + 位图）
+            EngineClockPainter.ZPLUS_IMAGE_ELEMENT_CLASS,  // 模板逐位 PNG（换机后锁屏实测）
         )
     }
 }

@@ -27,6 +27,22 @@ import kotlin.math.min
  */
 object StarMoonGlyph {
 
+    /** 文本链路的月牙宽度：占单元格宽的比例（保守，避免与相邻数字重叠）。 */
+    const val MOON_WIDTH_TEXT = 0.40f
+
+    /**
+     * 位图链路的月牙宽度：位图格子本身就是这一个数字的包围盒，可以放宽到
+     * [MOON_WIDTH_BITMAP]，否则月牙在大字号下会细长得像括号（2026-11-19 用户
+     * 反馈「桌面上的月亮太长了」）。
+     */
+    const val MOON_WIDTH_BITMAP = 0.62f
+
+    /**
+     * 位图链路整体收缩比例：字形尖端如果正好压在格子边缘，会被 TextView 的
+     * compound drawable 裁掉（用户反馈「上下被切掉了一部分」），留一点余量。
+     */
+    const val BITMAP_SHRINK = 0.94f
+
     private val digitBounds = Rect()
     private val path = Path()
     private val cutPath = Path()
@@ -51,6 +67,7 @@ object StarMoonGlyph {
         capH: Float,
         cellW: Float,
         star: Boolean,
+        moonWidth: Float = MOON_WIDTH_TEXT,
     ) {
         if (!(capH > 0f) || !(cellW > 0f)) return
         val style = paint.style
@@ -59,7 +76,7 @@ object StarMoonGlyph {
         if (star) {
             drawStar(path, cx, cy, capH, cellW)
         } else {
-            drawMoon(path, cutPath, outerRect, cutRect, cx, cy, capH, cellW)
+            drawMoon(path, cutPath, outerRect, cutRect, cx, cy, capH, cellW, moonWidth)
         }
         canvas.drawPath(path, paint)
         paint.style = style
@@ -77,11 +94,12 @@ object StarMoonGlyph {
         right: Float,
         bottom: Float,
         star: Boolean,
+        moonWidth: Float = MOON_WIDTH_TEXT,
     ) {
         val w = right - left
         val h = bottom - top
         if (!(w > 0f) || !(h > 0f)) return
-        draw(canvas, paint, left + w / 2f, top + h / 2f, h, w, star)
+        draw(canvas, paint, left + w / 2f, top + h / 2f, h, w, star, moonWidth)
     }
 
     /**
@@ -133,9 +151,10 @@ object StarMoonGlyph {
         cy: Float,
         capH: Float,
         cellW: Float,
+        moonWidth: Float,
     ) {
         val ry = capH * 0.50f
-        val rx = min(ry, cellW * 0.40f)
+        val rx = min(ry, cellW * moonWidth)
         outerRect.set(cx - rx, cy - ry, cx + rx, cy + ry)
         path.addOval(outerRect, Path.Direction.CW)
         // 挖除圆心向右上偏移，留下左侧月牙
@@ -154,4 +173,46 @@ object StarMoonGlyph {
     /** 供诊断/日志用：格子尺寸的取整，避免日志里出现一长串小数。 */
     fun describe(capH: Float, cellW: Float): String =
         "capH=${max(0f, capH).toInt()} cellW=${max(0f, cellW).toInt()}"
+
+    /**
+     * 量出位图的「墨迹」占比：`[left, top, right, bottom]`，取值 0..1（相对位图宽高）。
+     *
+     * 为什么要量（2026-11-19 用户反馈「桌面月亮太长、上下被切」）：主题数字位图
+     * 是 175×215 的格子，真实数字墨迹往往只占其中一部分（上下有留白）。若直接拿
+     * 格子当字形高度，星月就会被拉长顶到格子边缘，尖端还被裁掉。按真实墨迹定位后，
+     * 星月与主题数字同高、同位置、同留白。
+     *
+     * 全透明（量不出墨迹）时返回 null，调用方按整体格子处理。
+     */
+    fun inkFraction(bmp: android.graphics.Bitmap): FloatArray? {
+        val w = bmp.width
+        val h = bmp.height
+        if (w <= 0 || h <= 0) return null
+        val step = max(1, max(w, h) / 64)
+        var minX = w
+        var minY = h
+        var maxX = -1
+        var maxY = -1
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                if ((bmp.getPixel(x, y) ushr 24) and 0xFF > 16) {
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+                x += step
+            }
+            y += step
+        }
+        if (maxX < 0 || maxY < 0) return null
+        return floatArrayOf(
+            minX.toFloat() / w,
+            minY.toFloat() / h,
+            (maxX + 1).toFloat() / w,
+            (maxY + 1).toFloat() / h,
+        )
+    }
 }

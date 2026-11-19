@@ -33,7 +33,7 @@ import kotlin.math.sqrt
  */
 object EngineClockPainter {
 
-    enum class Kind { ZPLUS_TIME, EG_TIME }
+    enum class Kind { ZPLUS_TIME, EG_TIME, ZPLUS_IMAGE_NUMBER, ZPLUS_IMAGE_ELEMENT }
 
     private val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
@@ -46,10 +46,142 @@ object EngineClockPainter {
         when (kind) {
             Kind.ZPLUS_TIME -> drawZplusTime(canvas, view, seed)
             Kind.EG_TIME -> drawEgTime(canvas, view, seed)
+            Kind.ZPLUS_IMAGE_NUMBER -> drawImageNumber(canvas, view, seed)
+            Kind.ZPLUS_IMAGE_ELEMENT -> drawImageElement(canvas, view, seed)
         }
     }.getOrElse {
         GLog.w("引擎星月绘制失败：$kind", it)
         false
+    }
+
+    // ------------------------------------------- 锁屏（模板里的逐位数字图片）
+
+    /** 主题模板的时间数字图片名：`time1/time_2.png`（真机实测，2026-11-19）。 */
+    private val timeDigitPattern = Regex("""(?i).*time[^/]*/(?:.*?_)?(\d)\.(?:png|webp|jpg)$""")
+
+    /** 从图片元素名里取时间数字：命中返回 0..9，否则 null（日期/装饰一律放行）。 */
+    private fun timeDigitOf(src: String?): Int? {
+        if (src.isNullOrEmpty()) return null
+        if (src.contains("date", ignoreCase = true)) return null
+        val m = timeDigitPattern.matchEntire(src) ?: return null
+        return m.groupValues.getOrNull(1)?.toIntOrNull()
+    }
+
+    /**
+     * 通用图片元素 `com.zplus.engine.lk_view.ImageElementView` 画的时间数字位。
+     *
+     * 换机后（PJD110 / ColorOS 17.0.0.100）锁屏那串时间是这套模板用**逐位 PNG**
+     * 拼出来的：每个数字位就是一个 `ImageElementView`，`e` 字段是当前图片名
+     * （`time1/time_2.png`），由模板表达式按分钟换图。既不是文本（`tryUpdateText`
+     * 收不到），也不是 `TimeView`/`ImageNumber`（这两个钩子挂上了但一次没回调）。
+     *
+     * 处理：只拦名字里带 `time` 的数字图片，在同一个格子里改画星月；其余图片
+     * （日期、卡通装饰、快捷按钮）照原样走 ——— 用户要求日期不屏蔽。
+     */
+    private fun drawImageElement(canvas: Canvas, view: View, seed: Long): Boolean {
+        val src = Reflect.findField(view.javaClass, "e")?.get(view) as? String ?: return false
+        val digit = timeDigitOf(src) ?: return false
+        val w = view.width.toFloat()
+        val h = view.height.toFloat()
+        if (w <= 0f || h <= 0f) return false
+        val bmp = Reflect.findField(view.javaClass, "g")?.get(view) as? Bitmap
+        val hostPaint = Reflect.findField(view.javaClass, "a")?.get(view) as? Paint
+        val sampled = bmp?.let { averageColor(it) } ?: 0
+        glyphPaint.color = if (sampled != 0) sampled else (hostPaint?.color ?: Color.WHITE)
+        glyphPaint.alpha = hostPaint?.alpha ?: 255
+        glyphPaint.shader = null
+        // 与原数字同高同位置：按位图墨迹占比收进真实数字的包围盒（避免顶格裁切）。
+        val f = bmp?.let { StarMoonGlyph.inkFraction(it) }
+        var l = w * (f?.get(0) ?: 0f)
+        var t = h * (f?.get(1) ?: 0f)
+        var r = w * (f?.get(2) ?: 1f)
+        var b2 = h * (f?.get(3) ?: 1f)
+        val shrinkX = (r - l) * (1f - StarMoonGlyph.BITMAP_SHRINK) / 2f
+        val shrinkY = (b2 - t) * (1f - StarMoonGlyph.BITMAP_SHRINK) / 2f
+        l += shrinkX
+        r -= shrinkX
+        t += shrinkY
+        b2 -= shrinkY
+        StarMoonGlyph.drawInBox(
+            canvas = canvas,
+            paint = glyphPaint,
+            left = l,
+            top = t,
+            right = r,
+            bottom = b2,
+            star = StarMoonGlyph.isStar(seed, digit),
+            moonWidth = StarMoonGlyph.MOON_WIDTH_BITMAP,
+        )
+        logOnce("锁屏数字位", null)
+        return true
+    }
+
+    // ------------------------------------------------- 锁屏（ImageNumber 数字位图）
+
+    /**
+     * 主题模板里的「数字」元素 `com.zplus.engine.lk_view.ImageNumber`。
+     *
+     * 换机后锁屏那串时间（以及日期里的数字）就是它画的：元素从主题资源加载
+     * `src + "_" + 数字 + 后缀` 十张位图放进 `W[0..9]`，`draw(Canvas)` 里把
+     * `number` 表达式求值成整数字符串，逐位 `canvas.drawBitmap` 横排。
+     * 因此既没有文本可替换，也不是 `TimeView`（那个类这套模板根本不用）。
+     *
+     * 这里复刻它的横排逻辑：位数、每位的位图宽高、累加起点全都照原样，只把
+     * 位图换成星月；颜色按位图 alpha 加权取样（主题数字是黑/白/金都跟得住），
+     * 透明度沿用原有的 paint（宿主用它做淡入淡出）。
+     *
+     * @return false 表示这位元素的数字取不到（表达式求值失败等），调用方应放行原绘制。
+     */
+    private fun drawImageNumber(canvas: Canvas, view: View, seed: Long): Boolean {
+        val cls = view.javaClass
+        // needDraw() 为假时原方法什么都不画，这里也什么都不画。
+        val need = runCatching { cls.getMethod("needDraw").invoke(view) as? Boolean }.getOrNull()
+        if (need == false) return true
+        // S == null 表示这是张静态图（没有 src/number），不是时间，放行。
+        if (Reflect.findField(cls, "S")?.get(view) as? String == null) return false
+        val digitBitmaps = Reflect.findField(cls, "W")?.get(view) as? Array<*> ?: return false
+        val hostPaint = Reflect.findField(cls, "a0")?.get(view) as? Paint
+        val text = numberText(view, cls) ?: return false
+        if (text.isEmpty()) return false
+
+        var x = 0f
+        for (ch in text) {
+            if (ch !in '0'..'9') return false
+            val entry = digitBitmaps.getOrNull(ch - '0') ?: return false
+            val bmp = bitmapOf(entry) ?: return false
+            val w = bmp.width.toFloat()
+            val h = bmp.height.toFloat()
+            if (w <= 0f || h <= 0f) return false
+            val color = colorOf(entry)
+            glyphPaint.color = if (color != 0) color else Color.WHITE
+            glyphPaint.alpha = hostPaint?.alpha ?: 255
+            glyphPaint.shader = null
+            StarMoonGlyph.drawInBox(
+                canvas = canvas,
+                paint = glyphPaint,
+                left = x,
+                top = 0f,
+                right = x + w,
+                bottom = h,
+                star = StarMoonGlyph.isStar(seed, ch - '0'),
+            )
+            x += w
+        }
+        logOnce("锁屏数字", null)
+        return true
+    }
+
+    /** 复刻 ImageNumber 里 `number` 取值：优先变量 `V.l()`，否则表达式 `U.o()` 取绝对值。 */
+    private fun numberText(view: View, cls: Class<*>): String? {
+        val variable = Reflect.findField(cls, "V")?.get(view)
+        if (variable != null) {
+            val n = runCatching { variable.javaClass.getMethod("l").invoke(variable) }.getOrNull()
+            if (n is Number) return n.toInt().toString()
+        }
+        val expr = Reflect.findField(cls, "U")?.get(view) ?: return null
+        val f = runCatching { expr.javaClass.getMethod("o").invoke(expr) }.getOrNull() as? Number
+            ?: return null
+        return kotlin.math.abs(f.toFloat()).toInt().toString()
     }
 
     // -------------------------------------------------------------- 锁屏（位图数字）
@@ -282,9 +414,17 @@ object EngineClockPainter {
     fun kindFor(className: String): Kind? = when (className) {
         ZPLUS_CLASS -> Kind.ZPLUS_TIME
         EG_CLASS -> Kind.EG_TIME
+        ZPLUS_IMAGE_NUMBER_CLASS -> Kind.ZPLUS_IMAGE_NUMBER
+        ZPLUS_IMAGE_ELEMENT_CLASS -> Kind.ZPLUS_IMAGE_ELEMENT
         else -> null
     }
 
     const val ZPLUS_CLASS = "com.zplus.engine.lk_view.TimeView"
     const val EG_CLASS = "com.oplus.egview.widget.TimeView"
+
+    /** 主题模板里的数字元素（锁屏时间/日期里的数字位图）。 */
+    const val ZPLUS_IMAGE_NUMBER_CLASS = "com.zplus.engine.lk_view.ImageNumber"
+
+    /** 主题模板的通用图片元素（逐位 PNG 拼时间，换机后锁屏实测走这里）。 */
+    const val ZPLUS_IMAGE_ELEMENT_CLASS = "com.zplus.engine.lk_view.ImageElementView"
 }

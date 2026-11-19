@@ -252,13 +252,141 @@ class PersonalityClocksFeature(
         }
         return count
     }
+    /** 已经打印过「数字位仍是主题位图」告警的视图。 */
+    private val warnedDigitViews =
+        java.util.Collections.synchronizedSet(mutableSetOf<Int>())
+
     /**
-     * 全局主题下贴图片数字的写入源头。命中睡眠时隐藏该数字位（alpha=0），
-     * 否则恢复（alpha=1f）。每次刷新都会重贴所有数字位，因此解除睡眠后
-     * 下一次刷新即自动恢复，无需记忆原状态 —— 与 AOD 的 HIDE_VIEWS 同策略。
+     * 全局主题下贴图片数字的写入源头（`ClockTimeView#applyDigitDrawable`）。
      *
-     * 这里用 [View] 强转而非具体 DigitalTimeView 类型：它是 FrameLayout，
-     * 设 alpha 作用于整个数字位（含 compound drawable 图片），覆盖彻底。
+     * 2026-11-19 换机修正：上一版命中睡眠时把数字位 alpha 置 0，桌面时钟于是
+     * **整块消失**（真机截图确认为空白），与状态栏/锁屏的星月完全不一致。现在
+     * 数字位图已在取图源头（[hookClockNum]）换成 [StarMoonDrawable]，这里只做
+     * 兜底与诊断：睡眠中若数字位上贴的仍不是星月（说明这条链路没走
+     * getHostClockNum，例如别的主题走 ThemeClockHelper 缓存），就地再包一层，
+     * 并打告警便于定位漏掉的取图入口。解除睡眠时什么都不做：宿主每次刷新都会
+     * 重新 apply 原始位图，自然恢复。
+     */
+    private fun applyStarToDigitView(digitView: View?, source: String) {
+        if (digitView == null || !shouldMask()) return
+        val tv = runCatching {
+            digitView.javaClass.getMethod("getVisibleTextView").invoke(digitView) as? TextView
+        }.getOrNull() ?: return
+        val digitDrawable = tv.compoundDrawables.getOrNull(0) ?: return
+        // 星月已在取图源头换好；冒号是自己补的。都不该再被包一层。
+        if (digitDrawable is StarMoonDrawable || digitDrawable is ColonDrawable) {
+            if (GLog.isDebug && warnedDigitViews.add(System.identityHashCode(digitView))) {
+                GLog.d("图片数字位已是星月/冒号（$source）")
+            }
+            return
+        }
+        if (warnedDigitViews.add(System.identityHashCode(digitView))) {
+            GLog.w("图片数字位仍是主题位图，就地替换：${digitView.javaClass.name}（$source）")
+        }
+        val star = StarMoonGlyph.isStar(
+            Placeholder.minuteSeed(System.currentTimeMillis()),
+            0,
+        )
+        tv.setCompoundDrawables(StarMoonDrawable(digitDrawable, star), null, null, null)
+    }
+
+    /** 已经挂过 getHostClockNum 的 Class。 */
+    private val hookedNumClasses =
+        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
+
+    /**
+     * 主题数字位图的取图源头（全局主题的桌面/锁屏样式「图片数字」）。
+     *
+     * `Utils.getHostClockNum(context, digit)` 每次返回一张 0-9 数字位图，宿主随后
+     * 把它缩放、贴成数字位的 compound drawable。这里换成 [StarMoonDrawable]：
+     * intrinsic 尺寸沿用原位图，宿主算出的字宽/行高不变，只是画出来是星月；
+     * 星/月由「分钟种子 + 数字值」决定，与状态栏/文本链路图案一致。
+     *
+     * 只在睡眠时段替换；平时原样返回，主题位图不受影响。
+     */
+    private fun hookClockNum(cls: Class<*>, source: String): Int {
+        if (!hookedNumClasses.add(cls)) return 0
+        var count = 0
+        for (method in Reflect.methodsNamed(cls, "getHostClockNum")) {
+            if (method.parameterTypes.size != 2) continue
+            if (method.returnType != android.graphics.drawable.Drawable::class.java) continue
+            runCatching {
+                bag.add(
+                    xposed.hook(method)
+                        .setId("nocturne:personality:num:$source")
+                        .intercept { chain ->
+                            val result = chain.proceed()
+                            if (!shouldMask()) return@intercept result
+                            val digit = chain.getArg(1) as? Int ?: return@intercept result
+                            val origin = result as? android.graphics.drawable.Drawable
+                                ?: return@intercept result
+                            if (origin is StarMoonDrawable) return@intercept origin
+                            val star = StarMoonGlyph.isStar(
+                                Placeholder.minuteSeed(System.currentTimeMillis()),
+                                digit,
+                            )
+                            StarMoonDrawable(origin, star)
+                        },
+                )
+                GLog.i("挂钩成功：主题数字取图 getHostClockNum（来源 $source → ${cls.name}）")
+                count++
+            }.onFailure { GLog.w("挂钩主题数字取图失败（$source）", it) }
+        }
+        if (count == 0) GLog.w("getHostClockNum 不可挂：${cls.name}（来源 $source）")
+        return count
+    }
+
+    /** 已经挂过 getHostClockSymbol 的 Class。 */
+    private val hookedSymbolClasses =
+        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
+
+    /** 已经打过「补画冒号」日志的次数（避免每分钟刷屏）。 */
+    private val colonLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 时间分隔符的取图源头（`Utils.getHostClockSymbol(context)`）。
+     *
+     * 真机实测：桌面那套模板在 launcher 侧取不到分隔符图，返回 null，
+     * `applyDigitDrawable` 见到 null drawable 直接 return —— 数字换成星月之后
+     * 冒号位置就是空的（用户 2026-11-19 反馈「桌面上的冒号没了」）。
+     * 所以在源头兜底：主题没给就返回自己画的冒号（见 [ColonDrawable]），
+     * 主题给了就原样用它的。
+     */
+    private fun hookClockSymbol(cls: Class<*>, source: String): Int {
+        if (!hookedSymbolClasses.add(cls)) return 0
+        var count = 0
+        for (method in Reflect.methodsNamed(cls, "getHostClockSymbol")) {
+            if (method.parameterTypes.size != 1) continue
+            if (method.returnType != android.graphics.drawable.Drawable::class.java) continue
+            runCatching {
+                bag.add(
+                    xposed.hook(method)
+                        .setId("nocturne:personality:symbol:$source")
+                        .intercept { chain ->
+                            val result = chain.proceed()
+                            if (!shouldMask()) return@intercept result
+                            // 主题在 launcher 侧即使给得出分隔符图，画出来也是空的
+                            // （真机 22:23 验证：hook 到的是非 null，屏幕上却没有冒号），
+                            // 所以睡眠时段统一用自己补的冒号，与状态栏的「:」观感一致。
+                            if (colonLogged.compareAndSet(false, true)) {
+                                GLog.i(
+                                    "补画冒号：原分隔符图=${if (result == null) "null" else "有（未采用）"}" +
+                                        "（来源 $source）",
+                                )
+                            }
+                            ColonDrawable()
+                        },
+                )
+                GLog.i("挂钩成功：主题分隔符取图 getHostClockSymbol（来源 $source → ${cls.name}）")
+                count++
+            }.onFailure { GLog.w("挂钩主题分隔符取图失败（$source）", it) }
+        }
+        return count
+    }
+
+    /**
+     * 全局主题下贴图片数字的写入源头。命中睡眠时把数字位换成星月（见
+     * [applyStarToDigitView]/[hookClockNum]），不再 alpha 隐藏。
      */
     private fun hookImageDigit(cls: Class<*>, source: String): Int {
         if (!hookedImageDigitClasses.add(cls)) return 0
@@ -275,16 +403,11 @@ class PersonalityClocksFeature(
                         .setId("nocturne:personality:imgdigit:$source")
                         .intercept { chain ->
                             val result = chain.proceed()
-                            val hide = shouldMask()
-                            // 第 0 个参数是 DigitalTimeView（FrameLayout）。
-                            val digitView = runCatching { chain.getArg(0) as? View }.getOrNull()
-                            if (digitView != null) {
-                                val alpha = if (hide) 0f else 1f
-                                if (digitView.alpha != alpha) digitView.alpha = alpha
-                            }
-                            if (GLog.isDebug) {
-                                GLog.d("图片数字位刷新 mask=$hide view=${digitView?.javaClass?.name}（$source）")
-                            }
+                            // 第 0 个参数是 DigitalTimeView（FrameLayout，内含可见/不可见 TextView）。
+                            applyStarToDigitView(
+                                runCatching { chain.getArg(0) as? View }.getOrNull(),
+                                source,
+                            )
                             result
                         },
                 )
@@ -568,6 +691,20 @@ class PersonalityClocksFeature(
                 }
                 hooked += hookImageDigit(imgCls, "fast-path:$pkg")
             }
+            // ③ 图片数字的取图源头：换成星月 drawable（桌面不消失、与锁屏一致）。
+            for (className in NUM_CLASS_NAMES) {
+                val numCls = runCatching { loader.loadClass(className) }.getOrNull()
+                if (numCls == null) {
+                    if (GLog.isDebug) GLog.d("数字取图类不存在：$pkg → $className")
+                    continue
+                }
+                hooked += hookClockNum(numCls, "fast-path:$pkg")
+            }
+            // ④ 分隔符取图源头：主题没给就补冒号。
+            for (className in NUM_CLASS_NAMES) {
+                val symCls = runCatching { loader.loadClass(className) }.getOrNull() ?: continue
+                hooked += hookClockSymbol(symCls, "fast-path:$pkg")
+            }
             // ③ text 族（第三方主题锁屏 / AOD）：直接 setText，绕过 tryUpdateText。
             for (className in TEXT_CONTENT_CLASS_NAMES) {
                 val cls = runCatching { loader.loadClass(className) }.getOrNull()
@@ -657,6 +794,16 @@ class PersonalityClocksFeature(
          */
         val IMAGE_DIGIT_CLASS_NAMES = arrayOf(
             "com.oplus.keyguard.clock.digital.ui.view.ClockTimeView",
+        )
+
+        /**
+         * 图片数字的取图源头（真机反编译：digital/util/Utils.getHostClockNum）。
+         * 全局主题下每个数字位都从这里取 0-9 位图，是唯一能把「位图」换成
+         * 「星月」的地方；只包 applyDigitDrawable 只能拿到已贴好的 drawable，
+         * 不知道这一位是几（星/月选择要按数字值散列，才能与状态栏一致）。
+         */
+        val NUM_CLASS_NAMES = arrayOf(
+            "com.oplus.keyguard.clock.digital.util.Utils",
         )
 
         /**
