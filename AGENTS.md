@@ -21,6 +21,10 @@ app/src/main/java/com/ztc1997/nocturne/
     ClockMaskFeature.kt         状态栏/锁屏(shared.clocks)/AOD 的替换分派
     ClockTargets.kt             hook 候选表（HookMode: SET_TEXT/RETURN_VALUE/HIDE_VIEWS）
     PersonalityClocksFeature.kt 插件时钟源头拦截（核心，见下）
+    HostClockHider.kt           第三方主题锁屏/AOD 引擎时钟的钩子安装与状态自检
+    EngineClockPainter.kt       引擎时钟的星月直绘（锁屏位图 / AOD drawText）
+    StarMoonGlyph.kt            星月字形的唯一实现（Span 与引擎直绘共用）
+    StarMoonSpan.kt             文本链路的星月 ReplacementSpan
     ConfigSource.kt             远端偏好配置通道
     DndState.kt / HookBag.kt / Reflect.methods.kt
   appconfig/ 模块 App 侧 UI 与配置写入
@@ -80,12 +84,15 @@ ColorOS 17 时钟渲染分两套，都要拦：
    - **这套引擎自己遍历子元素直接调 `view.draw(canvas)`，不经
      `ViewGroup.dispatchDraw`，所以 `visibility=INVISIBLE` 和 `alpha=0` 一律无效**
      （真机两次实测：两个属性都设了，画面照旧）。唯一入口是绘制方法本身：
-     睡眠时 `intercept` 返回 null，跳过整段绘制
+     睡眠时不 proceed，改由 `EngineClockPainter` 在**原数字的格子**上画星月
+     （锁屏按 `e[0..9]` 位图宽高逐位排布、冒号 `e[10]` 照画；AOD 按
+     `mTextLines` 两行 + `fontSpacing + mExtraLineGap` 复刻基线）。字形来自
+     `StarMoonGlyph`——与桌面 `StarMoonSpan` 是同一份实现，所以三处观感一致
    - 引擎类在 VariUIEngine（`com.oplus.uiengine`）自己的 ClassLoader 里，宿主 CL
      找不到；且 `install()` 执行时 `currentAppContext()` 仍为 null。所以由 20s
      自检节拍补装，`ActivityThread.getSystemContext()` 兜底
    - **只在 SystemUI 进程挂**：launcher 的时钟走 personality 的星月占位，
-     一并拦会把桌面时钟变成空白
+     引擎钩子在那里既不需要也会互相打架
    - 日期类（`DateTimeView` / `DateView` / `LunarView`）放行——用户要的是
      「不显示时间」，日期与电量保持原样
 

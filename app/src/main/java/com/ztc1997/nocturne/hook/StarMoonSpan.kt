@@ -2,18 +2,14 @@ package com.ztc1997.nocturne.hook
 
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.Rect
-import android.graphics.RectF
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.ReplacementSpan
 import com.ztc1997.nocturne.core.Placeholder
 import kotlin.math.max
-import kotlin.math.min
 
 /**
- * 星月自绘 span（方案 2，2026-11-17；同日二次修订）。
+ * 星月自绘 span（方案 2，2026-11-17；同日二次修订；2026-11-19 抽出字形）。
  *
  * 背景：时钟专用字体只覆盖数字/冒号，☾/✦ 走字体回退后（a）垂直位置随各面
  * 时钟字体的度量上下漂移——桌面偏下、AOD/锁屏偏上；（b）☾ 与 ✦ 是两个独立
@@ -26,9 +22,8 @@ import kotlin.math.min
  *   遇到窄数字（如 "1"）整串比真实时间宽，锁屏→桌面过场动画按真实度量收敛，
  *   动画结束落点一比即"跳一下"（真机实测）。宽度逐位继承后，占位串与真实
  *   数字串度量完全一致，任何对真实数字无缝的动画对占位符同样无缝；
- * - 星 = 实芯四芒星（与模块应用图标一致的四芒样式），月 = 实芯月牙（Path
- *   DIFFERENCE 挖出），填充色取 paint.color，随状态栏 tint 等自动适配；
- *   窄单元格内字形按 cell 等比压横向，不与邻位重叠。
+ * - 形状（星/月的路径、比例、压扁规则）见 [StarMoonGlyph]——那是唯一实现，
+ *   引擎链路的锁屏/AOD 时钟也调它，保证同一台机器上星月长得一样。
  *
  * span 逐字符挂在 ☾/✦ 上；若宿主链路（如 RedOne 样式化）把文本重建为纯
  * String 丢掉 span，字符仍退回字体回退渲染——功能不丢，只是回到旧观感。
@@ -38,12 +33,6 @@ import kotlin.math.min
  * RETURN_VALUE）已改为纯字符占位，不再挂本 span。
  */
 class StarMoonSpan(private val digit: Char = '0') : ReplacementSpan() {
-
-    private val digitBounds = Rect()
-    private val path = Path()
-    private val cutPath = Path()
-    private val outerRect = RectF()
-    private val cutRect = RectF()
 
     override fun getSize(
         paint: Paint,
@@ -75,25 +64,19 @@ class StarMoonSpan(private val digit: Char = '0') : ReplacementSpan() {
         bottom: Int,
         paint: Paint,
     ) {
-        val isStar = text[start] == Placeholder.STAR
+        val star = text[start] == Placeholder.STAR
         val w = cellWidth(paint)
-        paint.getTextBounds("0", 0, 1, digitBounds)
-        val capH = (digitBounds.bottom - digitBounds.top).toFloat()
+        val capH = StarMoonGlyph.capHeight(paint)
         if (capH <= 0f) return
-        // 数字 ink band 的垂直中心（digitBounds.top 为负，位于基线上方）
-        val cy = baseline + (digitBounds.top + digitBounds.bottom) / 2f
-        val cx = x + w / 2f
-
-        val style = paint.style
-        paint.style = Paint.Style.FILL
-        path.reset()
-        if (isStar) {
-            drawStar(path, cx, cy, capH, w)
-        } else {
-            drawMoon(path, cutPath, outerRect, cutRect, cx, cy, capH, w)
-        }
-        canvas.drawPath(path, paint)
-        paint.style = style
+        StarMoonGlyph.draw(
+            canvas = canvas,
+            paint = paint,
+            cx = x + w / 2f,
+            cy = baseline + StarMoonGlyph.capCenterOffset(paint),
+            capH = capH,
+            cellW = w,
+            star = star,
+        )
     }
 
     /**
@@ -103,62 +86,6 @@ class StarMoonSpan(private val digit: Char = '0') : ReplacementSpan() {
     private fun cellWidth(paint: Paint): Float {
         val w = paint.measureText(digit.toString())
         return if (w > 0f) w else paint.textSize * 0.55f
-    }
-
-    /**
-     * 实芯四芒星（凹边曲线，同应用图标风格）。
-     * 高 = 数字 ink 高；宽超出窄单元格时按 cell 等比压缩横向（如 "1" 位）。
-     * 臂根用双控制点贴近中心的 cubic 贝塞尔收束，凹得深才不会画成胖菱形
-     * （真机 0.22r quad 版实测过肥，已改）。
-     */
-    private fun drawStar(path: Path, cx: Float, cy: Float, capH: Float, cellW: Float) {
-        val r = capH * 0.50f
-        val maxHalfW = cellW * 0.5f * 0.92f
-        val sx = if (r > maxHalfW) maxHalfW / r else 1f
-        val ri = r * 0.10f
-        path.moveTo(cx, cy - r)
-        path.cubicTo(cx + ri * sx, cy - ri, cx + ri * sx, cy - ri, cx + r * sx, cy)
-        path.cubicTo(cx + ri * sx, cy + ri, cx + ri * sx, cy + ri, cx, cy + r)
-        path.cubicTo(cx - ri * sx, cy + ri, cx - ri * sx, cy + ri, cx - r * sx, cy)
-        path.cubicTo(cx - ri * sx, cy - ri, cx - ri * sx, cy - ri, cx, cy - r)
-        path.close()
-    }
-
-    /**
-     * 实芯月牙（开口朝右，近似 ☾）：大椭圆挖掉右上偏移的同比例椭圆。
-     * 水平半径受单元格宽度约束（宽 < 高），避免月牙比数字列宽。
-     * 挖除圆偏移 0.55rx、同半径 → 月牙厚度 ≈ 0.45rx，尖角收干净
-     * （真机 0.62 偏移 + 0.92 半径版实测过厚过钝，已改）。
-     */
-    private fun drawMoon(
-        path: Path,
-        cutPath: Path,
-        outerRect: RectF,
-        cutRect: RectF,
-        cx: Float,
-        cy: Float,
-        capH: Float,
-        cellW: Float,
-    ) {
-        val ry = capH * 0.50f
-        val rx = min(ry, cellW * 0.40f)
-        outerRect.set(cx - rx, cy - ry, cx + rx, cy + ry)
-        path.addOval(outerRect, Path.Direction.CW)
-        // 挖除圆心向右上偏移，留下左侧月牙
-        val cutCx = cx + rx * 0.55f
-        val cutCy = cy - ry * 0.12f
-        cutRect.set(
-            cutCx - rx, cutCy - ry,
-            cutCx + rx, cutCy + ry,
-        )
-        cutPath.addOval(cutRect, Path.Direction.CW)
-        path.op(cutPath, Path.Op.DIFFERENCE)
-        cutPath.reset()
-        // 挖除后月牙 ink 全在单元格左半边（外椭圆以 cx 居中、挖除圆右偏），
-        // 视觉中心偏左；取实际包围盒水平平移，让 ink 几何中心回到 cx。
-        // 包围盒宽 < 2rx ≤ 0.8*cellW，平移后仍在单元格内。
-        path.computeBounds(outerRect, true)
-        path.offset(cx - (outerRect.left + outerRect.right) / 2f, 0f)
     }
 
     companion object {

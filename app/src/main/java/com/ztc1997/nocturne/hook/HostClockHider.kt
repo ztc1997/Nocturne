@@ -10,35 +10,33 @@ import com.ztc1997.nocturne.core.SleepWindow
 import io.github.libxposed.api.XposedInterface
 
 /**
- * 第三方主题下锁屏 / AOD 时钟的「整块隐藏」。
+ * 第三方主题下锁屏 / AOD 时钟的星月占位。
  *
- * 为什么需要单独一条路径（真机取证，2026-11-19）：
- *  - 第三方主题的锁屏时钟不是 personality 插件里那套文本时钟，而是主题自带的
- *    样式时钟控件：`CustomOplusKeyguardStyleClock`（id keyguard_style_clock）
- *    → KeyguardPluginViewRoot → KeyguardClockPluginContainer → ClockViewRoot
- *    → StyleWidgetsContainer → 主题控件。里面的数字是主题图片/自绘，没有文本
- *    可替换；`tryUpdateText` 只改到一批 isShown=false 的离屏控件（实测
- *    `[视图] ... shown=false`），屏幕上那串真实时间是另一条渲染链。
- *  - AOD 同理：`AodBlackLayout`（id workshop_aod_black_container）里放的是主题
- *    自绘的息屏时钟。
+ * 屏幕上那串真实时间到底由谁画（真机逐层取证，2026-11-19，结论推翻过三次）：
+ *  - 不是 personality 插件的 digital / text / gallery 族：`tryUpdateText` 只改到
+ *    一批 `isShown=false` 的离屏控件，`applyTextClockTimeAndExtra`、
+ *    `refreshClockText` 在锁屏上一次都没触发；
+ *  - 不是 `CustomOplusKeyguardStyleClock`（id keyguard_style_clock）：那个实例
+ *    alpha 置 0 后画面毫无变化，`keyguard_style_clock_enabled` 实测也是 0；
+ *  - 而是 **VariUIEngine 自绘**：uiautomator dump 里时钟就是普通
+ *    `android.widget.FrameLayout`（1272×2800 屏上 y=304..501、x=328..945），
+ *    挂在 `com.android.systemui:id/keyguard_plugin_container` 下，没有 text、
+ *    没有 id。容器实例就是 `KeyguardEngineContainer`，内部是
+ *    `com.zplus.engine.lk_view.TimeView`（0-9 位图逐位 drawBitmap）；
+ *  - AOD 同一套模板体系，类换成 `com.oplus.egview.widget.TimeView`
+ *    （`mTextLines` 两行「时 / 分」用 canvas.drawText）。
  *
- * 入口怎么选（实测方法表，2026-11-19）：
- * ```
- * CustomOplusKeyguardStyleClock:
- *   getBlendAlpha, getExtraAlpha, getInnerAlpha, hasOverlappingRendering,
- *   onAttachedToWindow, onDetachedFromWindow, setAlpha, setInnerAlpha
- * AodBlackLayout:
- *   invalidateChildInParent, onDescendantInvalidated, onInvalidated,
- *   onTouchEvent, setVisibility
- * ```
- * 两个类都**没有** dispatchDraw/onDraw，所以原来的"拦截绘制"方案挂不上钩子
- * （实测「整块隐藏已挂 0 个钩子」）。改用它们自己重写的状态写入口：
- *  - 锁屏：`setAlpha` / `setInnerAlpha` 强制 0，`getInnerAlpha` 返回 0；
- *  - AOD：`setVisibility` 强制 INVISIBLE。
+ * **为什么只能拦绘制**：这套引擎自己遍历子元素直接 `view.draw(canvas)`，不经
+ * `ViewGroup.dispatchDraw`，所以 `visibility=INVISIBLE` 和 `alpha=0` 全部无效
+ * （各自真机实测一次，画面照旧）。唯一入口是绘制方法本身，见
+ * [EngineClockPainter]：不 proceed，改在原数字的格子上画星月。
  *
- * 状态翻转：这些写入口只在宿主主动设置时被调，静止画面不会再触发，所以
- * attach 后起一个 [RECHECK_MS] 的主线程自检，翻转时重放一次宿主最后一次的
- * 写法（走我们的钩子，自然被改写成隐藏/恢复），避免卡在旧状态。
+ * 本类里另有两组「状态写入口」钩子（`CustomOplusKeyguardStyleClock#setAlpha`
+ * 那套 / `AodBlackLayout#setVisibility`），是早期路线留下的：那两个类都没有
+ * draw/onDraw 可挂（实测「整块隐藏已挂 0 个钩子」），只能拦状态写入。它们对
+ * 主题时钟不生效，但保留成本低，用于兜住宿主样式时钟被显示出来的场合。
+ * 状态写入口只在宿主主动设置时被调，静止画面不会再触发，所以 attach 后起一个
+ * [RECHECK_MS] 的主线程自检，翻转时重放宿主最后一次的写法。
  */
 class HostClockHider(
     private val xposed: XposedInterface,
@@ -181,16 +179,19 @@ class HostClockHider(
     private var containerLogged = false
 
     /**
-     * UIEngine 锁屏时钟的绘制拦截。
+     * UIEngine / EGView 锁屏与 AOD 时钟的绘制接管。
      *
-     * `com.zplus.engine.lk_view.TimeView#draw(Canvas)` 里是纯 Bitmap 绘制
-     * （`this.e[digit]` 是 0-9 位图数组，按 `getHourText()`/`getMinuteText()`
-     * 的字符取图后 `canvas.drawBitmap`），数字根本不是文本，替换字符串无从下手。
+     * 这两处的数字不是文本：
+     *  - 锁屏 `com.zplus.engine.lk_view.TimeView#draw`：0-9 位图数组逐位
+     *    `canvas.drawBitmap`；
+     *  - AOD `com.oplus.egview.widget.TimeView#onDraw`：`mTextLines` 两行
+     *    `canvas.drawText`。
      *
      * 而且这套引擎**不通过 ViewGroup.dispatchDraw 出图**，是自己遍历子元素直接
      * `view.draw(canvas)`，所以 `visibility=INVISIBLE` 和 `alpha=0` 全部无效
-     * （真机实测：两个都设了，画面照旧）。唯一有效的入口就是 `draw` 方法本身：
-     * 睡眠时返回 null 跳过整段绘制。
+     * （真机实测：两个都设了，画面照旧）。唯一入口就是绘制方法本身：睡眠时
+     * 不 proceed，改由 [EngineClockPainter] 在原数字的格子上画星月——与桌面/
+     * 状态栏是同一份字形实现，观感一致。
      */
     private fun hookEngineClocks(engineLoader: ClassLoader): Int {
         var n = 0
@@ -200,6 +201,7 @@ class HostClockHider(
                 GLog.w("引擎时钟类不存在：$name（loader=${engineLoader.javaClass.name}）")
                 continue
             }
+            val kind = EngineClockPainter.kindFor(name)
             var perClass = 0
             for (methodName in arrayOf("draw", "onDraw")) {
                 for (m in Reflect.methodsNamed(cls, methodName)) {
@@ -209,9 +211,18 @@ class HostClockHider(
                         bag.add(
                             xposed.hook(m)
                                 .setId("nocturne:engineclock:${cls.simpleName}:$methodName")
-                                .intercept { chain -> if (shouldMask()) null else chain.proceed() },
+                                .intercept { chain ->
+                                    if (!shouldMask()) return@intercept chain.proceed()
+                                    val self = chain.thisObject as? View
+                                    val canvas = chain.args.getOrNull(0) as? android.graphics.Canvas
+                                    if (kind != null && self != null && canvas != null) {
+                                        // 画不出来也保持空白：绝不回落成真实时间。
+                                        EngineClockPainter.draw(kind, canvas, self)
+                                    }
+                                    null
+                                },
                         )
-                        GLog.i("挂钩成功：引擎时钟 ${cls.simpleName}#$methodName")
+                        GLog.i("挂钩成功：引擎时钟 ${cls.simpleName}#$methodName（星月接管）")
                         1
                     }.getOrElse { GLog.w("挂引擎时钟失败：${cls.name}#$methodName", it); 0 }
                 }
@@ -443,21 +454,18 @@ class HostClockHider(
         )
 
         /**
-         * UIEngine / EGView 的时间控件。数字是 Bitmap 位图或 canvas.drawText，
-         * 只有拦截绘制方法才能让它们不出现在画面上。
+         * UIEngine / EGView 的时间控件。
+         *
+         * 只留**确实有绘制方法**的两个类（真机日志佐证：其余四个类
+         * `AnalogClockElementView` / `TextClockElementView` / `TimeTextView` /
+         * `AodDisplayTextView` 都没有 draw/onDraw(Canvas)，挂不上，纯噪音已删）。
          *
          * **不含日期类**（用户 2026-11-19 明确要求）：`DateTimeView`、`DateView`、
          * `LunarView` 一律放行，锁屏/AOD 上的「11月19日 星期四」保持原样。
          */
         private val ENGINE_CLOCK_CLASSES = arrayOf(
-            // 锁屏（UIEngine 模板）
-            "com.zplus.engine.lk_view.TimeView",
-            "com.zplus.engine.lk_view.AnalogClockElementView",
-            "com.zplus.engine.lk_view.TextClockElementView",
-            // AOD（EGView 模板）：垂直两行「时 / 分」，走 onDraw + canvas.drawText
-            "com.oplus.egview.widget.TimeView",
-            "com.oplus.egview.widget.TimeTextView",
-            "com.oplus.egview.widget.AodDisplayTextView",
+            EngineClockPainter.ZPLUS_CLASS,   // 锁屏：0-9 位图
+            EngineClockPainter.EG_CLASS,      // AOD：两行 drawText
         )
     }
 }
