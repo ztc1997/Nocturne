@@ -31,12 +31,13 @@ import io.github.libxposed.api.XposedInterface
  * （各自真机实测一次，画面照旧）。唯一入口是绘制方法本身，见
  * [EngineClockPainter]：不 proceed，改在原数字的格子上画星月。
  *
- * 本类里另有两组「状态写入口」钩子（`CustomOplusKeyguardStyleClock#setAlpha`
- * 那套 / `AodBlackLayout#setVisibility`），是早期路线留下的：那两个类都没有
- * draw/onDraw 可挂（实测「整块隐藏已挂 0 个钩子」），只能拦状态写入。它们对
- * 主题时钟不生效，但保留成本低，用于兜住宿主样式时钟被显示出来的场合。
- * 状态写入口只在宿主主动设置时被调，静止画面不会再触发，所以 attach 后起一个
- * [RECHECK_MS] 的主线程自检，翻转时重放宿主最后一次的写法。
+ * **2026-11-19 晚修复（官方主题「灵感接续」整块空白）**：早期那两组「状态写
+ * 入口」钩子（`CustomOplusKeyguardStyleClock#setAlpha` → 0、`getInnerAlpha` →
+ * 0、`AodBlackLayout#setVisibility` → INVISIBLE，外加自检节拍重放）对第三方主题
+ * 无效，但在**官方主题**下这两个视图就是屏幕上那块时钟/息屏容器的真身：一旦被
+ * 抹掉，时间**连同日期**一起消失，屏上只剩电量与通知图标（真机截图确认）。
+ * 它们只隐藏、不画，与「星月占位」的目标也相悖，故整组删除。现在本类只做
+ * 引擎时钟的绘制接管（[hookEngineClocks]）与容器定位诊断。
  */
 class HostClockHider(
     private val xposed: XposedInterface,
@@ -51,33 +52,13 @@ class HostClockHider(
         if (config().linkDnd) DndState.isActive() else false,
     )
 
-    /** 受控的锁屏样式时钟实例 → 宿主最后一次请求的 alpha。 */
-    private val alphaTargets =
-        java.util.concurrent.ConcurrentHashMap<View, Float>()
-
-    /** 受控的 AOD 容器实例 → 宿主最后一次请求的 visibility。 */
-    private val visibilityTargets =
-        java.util.concurrent.ConcurrentHashMap<View, Int>()
-
+    /** 受控的时钟视图（诊断用，仅记录宿主最近的请求，不改变行为）。 */
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
 
     fun install(): Int {
         var hooked = 0
-        for (name in TARGET_CLASS_NAMES) {
-            runCatching {
-                val cls = Reflect.loadClass(name, classLoader)
-                if (cls == null) {
-                    GLog.w("宿主时钟容器不存在：$name（classLoader=$classLoader）")
-                    return@runCatching
-                }
-                hooked += when (name) {
-                    KEYGUARD_CLASS -> hookKeyguardStyleClock(cls)
-                    else -> hookAodContainer(cls)
-                }
-            }.onFailure { GLog.w("宿主时钟容器处理失败：$name", it) }
-        }
-        GLog.i("宿主时钟整块隐藏已挂 $hooked 个钩子")
+        GLog.i("宿主时钟：只做引擎绘制接管（整块 alpha/visibility 隐藏路线已移除）")
         // UIEngine 锁屏时钟：走的不是文本也不是 View 属性，只能拦 draw。
         val engineLoader = runCatching {
             DndState.currentAppContext()?.createPackageContext(
@@ -232,6 +213,14 @@ class HostClockHider(
                                         ) {
                                             return@intercept chain.proceed()
                                         }
+                                        // 专用时间类画不出来 = 这块时钟会整块空白。必须留痕，
+                                        // 否则只能靠肉眼发现（2026-11-19 官方主题空白就是这么来的）。
+                                        if (failLogged.add(cls.name)) {
+                                            GLog.w(
+                                                "引擎时钟 ${cls.simpleName} 取不到数字，本块将空白" +
+                                                    "（size=${self.width}x${self.height}）",
+                                            )
+                                        }
                                     }
                                     null
                                 },
@@ -249,6 +238,9 @@ class HostClockHider(
 
     private var engineHooked = false
     private var engineDiagLogged = false
+
+    /** 已经报过「取不到数字」的引擎时钟类，避免每帧刷日志。 */
+    private val failLogged = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     /** `ActivityThread.getSystemContext()`：还没有 Application 时的兜底 Context。 */
     private fun systemContext(): Context? = runCatching {
@@ -352,123 +344,6 @@ class HostClockHider(
     }
 
 
-    private fun hookKeyguardStyleClock(cls: Class<*>) : Int {
-        var n = 0
-        for (name in arrayOf("setAlpha", "setInnerAlpha")) {
-            for (m in Reflect.methodsNamed(cls, name)) {
-                if (m.parameterTypes.size != 1) continue
-                if (m.parameterTypes[0] != java.lang.Float.TYPE) continue
-                n += runCatching {
-                    bag.add(
-                        xposed.hook(m)
-                            .setId("nocturne:hostclock:keyguard:$name")
-                            .intercept { chain ->
-                                val self = chain.thisObject as? View
-                                val wanted = chain.args[0] as? Float ?: 1f
-                                if (self != null) {
-                                    alphaTargets[self] = wanted
-                                    ensureTicking()
-                                }
-                                if (shouldMask()) {
-                                    chain.proceed(arrayOf<Any?>(0f))
-                                } else {
-                                    chain.proceed()
-                                }
-                            },
-                    )
-                    GLog.i("挂钩成功：锁屏样式时钟 ${cls.simpleName}#$name")
-                    1
-                }.getOrElse { GLog.w("挂锁屏时钟 $name 失败", it); 0 }
-            }
-        }
-        // getInnerAlpha 直接返回 0：部分渲染路径只读这个值决定内层可见度。
-        for (m in Reflect.methodsNamed(cls, "getInnerAlpha")) {
-            if (m.returnType != java.lang.Float.TYPE) continue
-            n += runCatching {
-                bag.add(
-                    xposed.hook(m)
-                        .setId("nocturne:hostclock:keyguard:getInnerAlpha")
-                        .intercept { chain ->
-                            if (shouldMask()) 0f else chain.proceed()
-                        },
-                )
-                GLog.i("挂钩成功：锁屏样式时钟 ${cls.simpleName}#getInnerAlpha")
-                1
-            }.getOrElse { GLog.w("挂 getInnerAlpha 失败", it); 0 }
-        }
-        // attach 时补一刀：宿主可能在 attach 之前就把 alpha 设好了，之后不再调。
-        for (m in Reflect.methodsNamed(cls, "onAttachedToWindow")) {
-            n += runCatching {
-                bag.add(
-                    xposed.hook(m)
-                        .setId("nocturne:hostclock:keyguard:attach")
-                        .intercept { chain ->
-                            val r = chain.proceed()
-                            val self = chain.thisObject as? View
-                            if (self != null) {
-                                alphaTargets.putIfAbsent(self, 1f)
-                                applyAlpha(self)
-                                ensureTicking()
-                                runCatching { applyContainer() }
-                            }
-                            r
-                        },
-                )
-                GLog.i("挂钩成功：锁屏样式时钟 ${cls.simpleName}#onAttachedToWindow")
-                1
-            }.getOrElse { GLog.w("挂 onAttachedToWindow 失败", it); 0 }
-        }
-        return n
-    }
-
-    private fun applyAlpha(v: View) {
-        val want = if (shouldMask()) 0f else (alphaTargets[v] ?: 1f)
-        if (v.alpha != want) {
-            runCatching { v.alpha = want }
-            if (GLog.isDebug) GLog.d("锁屏样式时钟 alpha → $want")
-        }
-    }
-
-    // ----------------------------------------------------------------- AOD
-
-    private fun hookAodContainer(cls: Class<*>): Int {
-        var n = 0
-        for (m in Reflect.methodsNamed(cls, "setVisibility")) {
-            if (m.parameterTypes.size != 1) continue
-            if (m.parameterTypes[0] != Integer.TYPE) continue
-            n += runCatching {
-                bag.add(
-                    xposed.hook(m)
-                        .setId("nocturne:hostclock:aod:setVisibility")
-                        .intercept { chain ->
-                            val self = chain.thisObject as? View
-                            val wanted = chain.args[0] as? Int ?: View.VISIBLE
-                            if (self != null) {
-                                visibilityTargets[self] = wanted
-                                ensureTicking()
-                            }
-                            if (shouldMask()) {
-                                chain.proceed(arrayOf<Any?>(View.INVISIBLE))
-                            } else {
-                                chain.proceed()
-                            }
-                        },
-                )
-                GLog.i("挂钩成功：AOD 容器 ${cls.simpleName}#setVisibility")
-                1
-            }.getOrElse { GLog.w("挂 AOD setVisibility 失败", it); 0 }
-        }
-        return n
-    }
-
-    private fun applyVisibility(v: View) {
-        val want = if (shouldMask()) View.INVISIBLE else (visibilityTargets[v] ?: View.VISIBLE)
-        if (v.visibility != want) {
-            runCatching { v.visibility = want }
-            if (GLog.isDebug) GLog.d("AOD 容器 visibility → $want")
-        }
-    }
-
     // ------------------------------------------------------------- 状态自检
 
     private fun ensureTicking() {
@@ -483,28 +358,13 @@ class HostClockHider(
             // 不存在，如果只在 locate 成功时补装，AOD 就会整段漏拦（真机踩过）。
             runCatching { ensureEngineHook(DndState.currentAppContext()) }
             applyContainer()
-            for (v in alphaTargets.keys) applyAlpha(v)
-            for (v in visibilityTargets.keys) applyVisibility(v)
             handler.postDelayed(this, RECHECK_MS)
         }
     }
 
     companion object {
-        /** 隐藏期间的重检间隔：越短恢复越快，越长越省电。 */
+        /** 引擎钩子补装的自检间隔。 */
         private const val RECHECK_MS = 20_000L
-
-        private const val KEYGUARD_CLASS =
-            "com.oplus.systemui.keyguard.view.CustomOplusKeyguardStyleClock"
-
-        /**
-         * 需要整块隐藏的容器（宿主类，走宿主 classLoader，能稳定命中）：
-         *  - CustomOplusKeyguardStyleClock：锁屏样式时钟根视图（id keyguard_style_clock）
-         *  - AodBlackLayout：主题息屏（workshop）黑底容器（id workshop_aod_black_container）
-         */
-        private val TARGET_CLASS_NAMES = arrayOf(
-            KEYGUARD_CLASS,
-            "com.oplus.systemui.aod.aodclock.off.AodBlackLayout",
-        )
 
         /**
          * UIEngine / EGView 的时间控件。

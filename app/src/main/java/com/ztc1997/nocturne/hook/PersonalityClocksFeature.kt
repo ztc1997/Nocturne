@@ -531,46 +531,9 @@ class PersonalityClocksFeature(
         return count
     }
 
-    /** 已经挂过锁屏样式时钟（style.widgets）的 Class。 */
-    private val hookedStyleWidgetsClasses =
-        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
-
     /** 已经挂过主题锁屏容器（StyleWidgetsContainer）的 Class。 */
     private val hookedStyleContainers =
         java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
-
-    /**
-     * 第三方主题锁屏样式时钟（`com.oplus.keyguard.style.widgets`）。
-     *
-     * 这条路径既不是 personality 的 digital/text/gallery 族，也没有可替换的文本：
-     * 整个时钟由该插件的 `widgetsViewRoot` 渲染，宿主通过
-     * `setWidgetsContainerAlpha` / `setWidgetsVisibility` 控制显隐
-     * （真机反编译：KeyguardStyleWidgetsImpl，`getWidgetsViewRoot().setAlpha/ setVisibility`）。
-     * 因此在视图状态变化与显隐控制回调之后，按睡眠判定直接设整棵树 alpha：
-     * 命中 0f、解除 1f。alpha 是持久属性，宿主不会按分钟重置，锁屏停留期间保持。
-     */
-    private fun hookStyleWidgets(cls: Class<*>, source: String): Int {
-        if (!hookedStyleWidgetsClasses.add(cls)) return 0
-        var count = 0
-        for (name in STYLE_WIDGETS_METHODS) {
-            for (method in Reflect.methodsNamed(cls, name)) {
-                runCatching {
-                    bag.add(
-                        xposed.hook(method)
-                            .setId("nocturne:stylewidgets:$name:$source")
-                            .intercept { chain ->
-                                val result = chain.proceed()
-                                applyStyleWidgetsAlpha(chain.thisObject)
-                                result
-                            },
-                    )
-                    GLog.i("挂钩成功：锁屏样式时钟 $name（来源 $source）")
-                    count++
-                }.onFailure { GLog.w("挂钩锁屏样式时钟失败：$name（$source）", it) }
-            }
-        }
-        return count
-    }
 
     /**
      * 主题锁屏容器 `StyleWidgetsContainer`（personality 插件里的 FrameLayout 子类）。
@@ -635,18 +598,6 @@ class PersonalityClocksFeature(
             d++
         }
         GLog.i(sb.toString())
-    }
-
-    private fun applyStyleWidgetsAlpha(self: Any?) {
-        if (self == null) return
-        val root = runCatching {
-            self.javaClass.getMethod("getWidgetsViewRoot").invoke(self) as? View
-        }.getOrNull() ?: return
-        val alpha = if (shouldMask()) 0f else 1f
-        if (root.alpha != alpha) {
-            root.alpha = alpha
-            if (GLog.isDebug) GLog.d("锁屏样式时钟 alpha=$alpha（${root.javaClass.name}）")
-        }
     }
 
     /**
@@ -742,25 +693,6 @@ class PersonalityClocksFeature(
                 hooked += hookStyleContainer(cls, "fast-path:$pkg")
             }
         }
-        // ⑥ 第三方主题锁屏样式时钟（独立包 com.oplus.keyguard.style.widgets）。
-        val styleLoader = runCatching {
-            ctx.createPackageContext(
-                STYLE_WIDGETS_PACKAGE,
-                Context.CONTEXT_INCLUDE_CODE or Context.CONTEXT_IGNORE_SECURITY,
-            ).classLoader
-        }.getOrNull()
-        if (styleLoader == null) {
-            if (GLog.isDebug) GLog.d("锁屏样式时钟插件不可用：$STYLE_WIDGETS_PACKAGE")
-        } else {
-            for (className in STYLE_WIDGETS_CLASS_NAMES) {
-                val cls = runCatching { styleLoader.loadClass(className) }.getOrNull()
-                if (cls == null) {
-                    if (GLog.isDebug) GLog.d("锁屏样式类不存在：$className")
-                    continue
-                }
-                hooked += hookStyleWidgets(cls, "fast-path:$STYLE_WIDGETS_PACKAGE")
-            }
-        }
         if (hooked > 0) GLog.i("插件时钟拦截已挂 $hooked 个钩子（快速路径）")
         return hooked
     }
@@ -837,29 +769,6 @@ class PersonalityClocksFeature(
          */
         val STYLE_CONTAINER_CLASS_NAMES = arrayOf(
             "com.oplus.keyguard.clock.base.ui.view.StyleWidgetsContainer",
-        )
-
-        /**
-         * 第三方主题锁屏样式时钟插件（KeyguardStyleWidget.apk）。
-         * 独立于 personality 插件，通过 keyguard_plugin_container 注入宿主。
-         */
-        const val STYLE_WIDGETS_PACKAGE = "com.oplus.keyguard.style.widgets"
-
-        val STYLE_WIDGETS_CLASS_NAMES = arrayOf(
-            "com.oplus.keyguard.style.widgets.container.KeyguardStyleWidgetsImpl",
-        )
-
-        /**
-         * 锁屏样式时钟的视图状态/显隐回调（真机反编译：KeyguardStyleWidgetsImpl）。
-         * 覆盖：锁屏视图状态变化、宿主控制容器 alpha、容器显隐、uiState 切换（锁屏/AOD）、
-         * 时钟状态回调。这些回调之后统一按睡眠判定设 widgetsViewRoot 的 alpha。
-         */
-        val STYLE_WIDGETS_METHODS = arrayOf(
-            "onViewStateChanged",
-            "setWidgetsContainerAlpha",
-            "setWidgetsVisibility",
-            "onUiStateChanged",
-            "onClockStateChanged",
         )
 
         /**
