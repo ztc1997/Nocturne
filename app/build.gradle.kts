@@ -1,7 +1,36 @@
+import java.io.File
+import java.io.InputStreamReader
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
 }
+
+// ---------------------------------------------------------------------------
+// 签名：口令只放在项目根的 keystore.properties（已 gitignore）。
+//
+// 该文件存在且四项填全时，debug 与 release 都用它签名。统一签名是必须的：
+// 设备上装的是 release 签名版，debug 用默认 debug key 会直接报
+// INSTALL_FAILED_UPDATE_INCOMPATIBLE（2026-11-19 实测）。
+// 文件缺失时退回 Gradle 默认行为，不影响他人克隆后构建。
+// 用 UTF-8 读取：storeFile 路径含中文（OneDrive/项目资料），Properties 默认
+// ISO-8859-1 会把路径解坏。
+// ---------------------------------------------------------------------------
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.isFile) {
+        keystorePropsFile.inputStream().use {
+            load(InputStreamReader(it, Charsets.UTF_8))
+        }
+    }
+}
+
+fun keystoreValue(key: String): String? =
+    keystoreProps.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
+
+val signingReady = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    .all { keystoreValue(it) != null }
 
 android {
     namespace = "com.ztc1997.nocturne"
@@ -17,8 +46,29 @@ android {
         versionName = "0.1.2"
     }
 
+    signingConfigs {
+        if (signingReady) {
+            create("release") {
+                val raw = keystoreValue("storeFile")!!
+                storeFile = if (File(raw).isAbsolute) {
+                    File(raw)
+                } else {
+                    rootProject.file(raw)
+                }
+                storePassword = keystoreValue("storePassword")
+                keyAlias = keystoreValue("keyAlias")
+                keyPassword = keystoreValue("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            // 与设备上已安装的版本同签名，install -r 才能覆盖升级。
+            if (signingReady) signingConfig = signingConfigs.getByName("release")
+        }
         release {
+            if (signingReady) signingConfig = signingConfigs.getByName("release")
             // 完整 R8（full mode）：对整个程序统一优化，体积收益最大。
             //
             // 不要用实验性 packageScope 只优化 androidx/kotlin/kotlinx——
