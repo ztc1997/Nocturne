@@ -42,7 +42,7 @@ android {
         applicationId = "com.ztc1997.nocturne"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
+        versionCode = 6
         versionName = "0.1.2"
     }
 

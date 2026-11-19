@@ -18,6 +18,13 @@
     <string name="time_start">Start time</string>
     <string name="time_end">End time</string>
     <string name="setting_link_dnd">Link with Do Not Disturb</string>
+    <string name="setting_follow_system">Follow the system\'s sleep schedule</string>
+    <string name="setting_follow_system_desc">Read the bedtime and wake-up time learned by the system (Settings - Personal information). Times below become read-only.</string>
+
+    <!-- System schedule display -->
+    <string name="time_from_system">Automatic (learned by the system)</string>
+    <string name="follow_system_fetching">Reading the sleep schedule from the system…</string>
+    <string name="follow_system_waiting">System schedule not available yet. It appears once the system clock process has run with Nocturne enabled.</string>
 
     <!-- Manual override options -->
     <string name="override_auto">Automatic (schedule / DND)</string>

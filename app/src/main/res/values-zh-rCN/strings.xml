@@ -18,6 +18,13 @@
     <string name="time_start">开始时间</string>
     <string name="time_end">结束时间</string>
     <string name="setting_link_dnd">与免打扰模式联动</string>
+    <string name="setting_follow_system">跟随系统作息</string>
+    <string name="setting_follow_system_desc">读取系统自动学习的入睡与起床时间（设置 → 个人信息）。开启后下方时间只读，关闭则回到手动设置。</string>
+
+    <!-- 系统作息展示 -->
+    <string name="time_from_system">自动（系统学习）</string>
+    <string name="follow_system_fetching">正在从系统读取作息…</string>
+    <string name="follow_system_waiting">尚未取到系统作息。模块启用且系统时钟进程运行过一次后会自动出现。</string>
 
     <!-- 手动覆盖选项 -->
     <string name="override_auto">自动（按时段/勿扰）</string>

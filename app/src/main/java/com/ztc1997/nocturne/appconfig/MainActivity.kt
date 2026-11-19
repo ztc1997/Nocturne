@@ -1,8 +1,11 @@
 package com.ztc1997.nocturne.appconfig
 
+import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
@@ -37,6 +40,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,6 +48,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -51,6 +56,8 @@ import com.ztc1997.nocturne.R
 import com.ztc1997.nocturne.core.ConfigKeys
 import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.SleepWindow
+import com.ztc1997.nocturne.core.SystemSleepTime
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** 设置页入口：原 View 构建实现已迁移到 Compose Material 3。 */
@@ -66,6 +73,59 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class OverrideOption(val labelRes: Int, val value: Int)
+
+/** 跟随系统但还没拿到值时展示的占位。 */
+private const val NO_TIME = "--:--"
+
+/**
+ * 读 hook 侧写进 Settings.Secure 的系统作息缓存。
+ *
+ * hook 进程（SystemUI / launcher）持有 `oppo.permission.OPPO_COMPONENT_SAFE`，
+ * 能读场景服务的 provider；模块 App 没有这个权限，所以只能读这份镜像。
+ * 读不到说明目标进程还没跑过（设备重启后、或模块未启用），界面给占位提示。
+ */
+private fun readSystemSleep(context: Context): Pair<String, String>? =
+    runCatching {
+        Settings.Secure.getString(context.contentResolver, SystemSleepTime.SECURE_KEY)
+    }.getOrNull().let(SystemSleepTime::decode)
+
+/** hook 侧回执：最后一次刷新请求的序号（0 = 还没有过）。 */
+private fun readSleepAck(context: Context): Int =
+    runCatching {
+        Settings.Secure.getInt(context.contentResolver, SystemSleepTime.ACK_KEY, 0)
+    }.getOrDefault(0)
+
+/**
+ * 请 hook 侧立刻去查一次系统作息，返回本次请求序号。
+ *
+ * 模块 App 没有场景服务 provider 的读权限，只能让持有权限的 hook 进程代查；
+ * 请求序号走配置通道，hook 查完把同一序号写进 [SystemSleepTime.ACK_KEY]。
+ * 框架还没连上（写不进远端）时返回 null —— 这时只能读旧缓存或等 hook 自己刷新。
+ */
+private fun requestSystemSleepRefresh(): Int? {
+    if (ModulePreferences.backend() != ModulePreferences.Backend.REMOTE) return null
+    val token = (System.currentTimeMillis() and 0x7FFF_FFFF).toInt().coerceAtLeast(1)
+    val ok = ModulePreferences.edit { putInt(ConfigKeys.SYSTEM_SLEEP_REQUEST, token) }
+    return if (ok) token else null
+}
+
+/**
+ * 本次刷新请求是否已了结：hook 回执对上了、请求发不出去但已有缓存、或等超时。
+ *
+ * 没请求可发（token 为 null）且缓存为空时返回 false，保持"读取中"，靠慢轮询等回写。
+ */
+private fun settled(
+    context: Context,
+    token: Int?,
+    window: Pair<String, String>?,
+    deadline: Long,
+): Boolean = when {
+    // 回执对上了也要确认值真的读到了：镜像键可能被外部清掉
+    token != null && window != null && readSleepAck(context) == token -> true
+    token == null && window != null -> true
+    SystemClock.elapsedRealtime() > deadline -> true
+    else -> false
+}
 
 private val OVERRIDE_OPTIONS = listOf(
     OverrideOption(R.string.override_auto, ConfigKeys.OVERRIDE_AUTO),
@@ -135,6 +195,38 @@ private fun SettingsScreen() {
     val values = form.values
     val backendRes = backendStatusRes(form.backend)
 
+    // 系统自动学习的作息由目标进程（hook 侧）读取后写进 Settings.Secure，
+    // 模块 App 没有场景服务 provider 的读权限，只能读这份缓存。
+    // 打开开关时主动请求 hook 侧立刻刷新一次，别让用户等 5 分钟。
+    val context = LocalContext.current
+    var systemWindow by remember { mutableStateOf(readSystemSleep(context)) }
+    var fetchPending by remember { mutableStateOf(false) }
+    LaunchedEffect(values.followSystem) {
+        if (!values.followSystem) {
+            fetchPending = false
+            return@LaunchedEffect
+        }
+        // 已有缓存先展示，避免一开开关就闪 "--:--"
+        systemWindow = readSystemSleep(context)
+        val token = requestSystemSleepRefresh()
+        // 请求没能发出去（框架未连接）时不要显示"读取中"——什么都不会来
+        fetchPending = token != null
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        while (true) {
+            val window = readSystemSleep(context)
+            if (window != null) systemWindow = window
+            if (fetchPending) {
+                fetchPending = !settled(context, token, window, deadline)
+            }
+            delay(if (fetchPending) 250 else 5_000)
+        }
+    }
+    val followSystem = values.followSystem
+    val manualStart = values.windowStart
+    val manualEnd = values.windowEnd
+    val shownStart = if (followSystem) systemWindow?.first ?: NO_TIME else manualStart
+    val shownEnd = if (followSystem) systemWindow?.second ?: NO_TIME else manualEnd
+
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     // 点击回调不是 Composable 上下文，提前把文案解析好。
@@ -182,6 +274,12 @@ private fun SettingsScreen() {
                         checked = values.scheduleEnabled,
                         onCheckedChange = { on -> form.mutate { it.copy(scheduleEnabled = on) } },
                     )
+                    SettingSwitchRow(
+                        headline = stringResource(R.string.setting_follow_system),
+                        supporting = stringResource(R.string.setting_follow_system_desc),
+                        checked = values.followSystem,
+                        onCheckedChange = { on -> form.mutate { it.copy(followSystem = on) } },
+                    )
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -190,15 +288,28 @@ private fun SettingsScreen() {
                     ) {
                         TimeField(
                             label = stringResource(R.string.time_start),
-                            value = values.windowStart,
+                            value = shownStart,
                             onClick = { showStartPicker = true },
                             modifier = Modifier.weight(1f),
+                            enabled = !followSystem,
+                            hint = if (followSystem) stringResource(R.string.time_from_system) else null,
                         )
                         TimeField(
                             label = stringResource(R.string.time_end),
-                            value = values.windowEnd,
+                            value = shownEnd,
                             onClick = { showEndPicker = true },
                             modifier = Modifier.weight(1f),
+                            enabled = !followSystem,
+                            hint = if (followSystem) stringResource(R.string.time_from_system) else null,
+                        )
+                    }
+                    if (followSystem && systemWindow == null) {
+                        InfoText(
+                            if (fetchPending) {
+                                stringResource(R.string.follow_system_fetching)
+                            } else {
+                                stringResource(R.string.follow_system_waiting)
+                            },
                         )
                     }
                     SettingSwitchRow(
@@ -250,6 +361,7 @@ private fun SettingsScreen() {
                             putString(ConfigKeys.WINDOW_END, snapshot.windowEnd)
                             putBoolean(ConfigKeys.LINK_DND, snapshot.linkDnd)
                             putInt(ConfigKeys.MANUAL_OVERRIDE, snapshot.manualOverride)
+                            putBoolean(ConfigKeys.FOLLOW_SYSTEM, snapshot.followSystem)
                         }
                         if (ok) form.onSaved()
                         showSnackbar(
@@ -303,9 +415,11 @@ private fun TimeField(
     value: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    hint: String? = null,
 ) {
     OutlinedCard(
-        modifier = modifier.clickable(onClick = onClick),
+        modifier = if (enabled) modifier.clickable(onClick = onClick) else modifier,
     ) {
         Column(
             modifier = Modifier
@@ -320,8 +434,19 @@ private fun TimeField(
             Text(
                 text = value,
                 style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
+            if (hint != null) {
+                Text(
+                    text = hint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }
@@ -426,9 +551,15 @@ private fun SettingSwitchRow(
     headline: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    supporting: String? = null,
 ) {
     ListItem(
         headlineContent = { Text(headline) },
+        supportingContent = if (supporting != null) {
+            { Text(supporting, style = MaterialTheme.typography.bodySmall) }
+        } else {
+            null
+        },
         trailingContent = {
             Switch(checked = checked, onCheckedChange = onCheckedChange)
         },
