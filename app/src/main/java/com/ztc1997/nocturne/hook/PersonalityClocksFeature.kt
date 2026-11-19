@@ -2,11 +2,13 @@ package com.ztc1997.nocturne.hook
 
 import android.content.Context
 import android.view.View
+import android.widget.TextView
 import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.GLog
 import com.ztc1997.nocturne.core.Placeholder
 import com.ztc1997.nocturne.core.SleepWindow
 import io.github.libxposed.api.XposedInterface
+import java.util.Calendar
 
 /**
  * KeyguardPersonalityClocks 插件时钟拦截（真机反编译见 HOOK_PLAN.md §2.6）。
@@ -59,6 +61,9 @@ class PersonalityClocksFeature(
     /** 已经挂过 tryUpdateText 的 Class，避免同一 Class 被多路重复挂钩。 */
     private val hookedClasses = java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
 
+    /** 诊断用：已经打印过视图信息的控件，避免每分钟刷屏。 */
+    private val dumpedViews = java.util.Collections.synchronizedSet(mutableSetOf<Int>())
+
     /**
      * 在给定 Class 上挂 tryUpdateText 钩子（幂等：同一 Class 只挂一次）。
      * @param source 日志里标注的安装来源
@@ -90,8 +95,21 @@ class PersonalityClocksFeature(
                                     Placeholder.minuteSeed(System.currentTimeMillis()),
                                 )
                                 if (GLog.isDebug) GLog.d("屏蔽时间数字：$arg → \"$masked\"（$source）")
+                                if (PROBE_VIEW) {
+                                    runCatching { dumpMaskedView(chain.thisObject, arg, masked) }
+                                        .onFailure { GLog.w("[视图] 诊断失败", it) }
+                                }
                                 // 带 StarMoonSpan：星月自绘、逐位继承原数字 advance（见 StarMoonSpan）
-                                chain.proceed(arrayOf<Any?>(StarMoonSpan.spanned(masked, arg)))
+                                val r = chain.proceed(
+                                    arrayOf<Any?>(StarMoonSpan.spanned(masked, arg)),
+                                )
+                                if (PROBE_VIEW) {
+                                    runCatching {
+                                        val tv = chain.thisObject as? TextView
+                                        GLog.d("[视图] 写入后 text=\"${tv?.text}\"")
+                                    }.onFailure { GLog.w("[视图] 写入后读取失败", it) }
+                                }
+                                r
                             } else {
                                 // 非纯数字放行（冒号/AM/PM/日期/天气）；debug 下记录
                                 // 数字类以外的写入，用于排查唤醒瞬间是否走了别的入口。
@@ -107,10 +125,133 @@ class PersonalityClocksFeature(
         }.onFailure { GLog.w("挂钩插件时钟失败（来源 $source）", it) }
     }
 
+    /**
+     * 诊断：把被改写的时间数字控件的位置、状态、最终文本、父链打出来。
+     *
+     * 目的：锁屏上明明执行了「屏蔽时间数字」，屏幕却仍显示真实时间。
+     * 需要判断两种可能 —— 写法被后续覆盖，或者被改写的根本不是屏幕上那个控件
+     * （例如动画用的离屏副本、AOD 副视图）。
+     */
+    private fun dumpMaskedView(self: Any?, arg: CharSequence?, masked: CharSequence) {
+        val tv = self as? TextView
+        if (tv == null) {
+            GLog.d("[视图] 不是 TextView：self=${self?.javaClass?.name}")
+            return
+        }
+        val hash = System.identityHashCode(tv)
+        val first = dumpedViews.add(hash)
+        val sb = StringBuilder("[视图] hash=$hash")
+        sb.append(" class=${tv.javaClass.name}")
+        sb.append(" id=")
+        runCatching {
+            sb.append("0x").append(Integer.toHexString(tv.id))
+            if (tv.id != 0) sb.append("(").append(tv.resources.getResourceEntryName(tv.id)).append(")")
+        }.onFailure { sb.append("?") }
+        val rect = android.graphics.Rect()
+        val vis = runCatching { tv.getGlobalVisibleRect(rect) }.getOrDefault(false)
+        sb.append(" visible=$vis rect=$rect")
+        sb.append(" w=${tv.width} h=${tv.height}")
+        sb.append(" alpha=${tv.alpha} shown=${tv.isShown} attached=${tv.isAttachedToWindow}")
+        sb.append(" text=\"${tv.text}\"")
+        sb.append(" arg=\"$arg\" masked=\"$masked\"")
+        if (first) {
+            var p = tv.parent
+            var d = 0
+            while (p != null && d < 8) {
+                if (p is View) {
+                    sb.append("\n    <- ${p.javaClass.name}")
+                    runCatching {
+                        if (p.id != 0) {
+                            sb.append("(").append(p.resources.getResourceEntryName(p.id)).append(")")
+                        }
+                    }
+                }
+                p = p.parent
+                d++
+            }
+        }
+        GLog.d(sb.toString())
+    }
+
     /** 已经挂过 applyDigitDrawable 的 Class，避免同一 Class 被多路重复挂钩。 */
     private val hookedImageDigitClasses =
         java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
 
+    /** 已经挂过 ThemeClockHelper.setTextImg 的 Class。 */
+    private val hookedThemeImgClasses =
+        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
+
+    /**
+     * 第三方/全局主题的「图片数字」写入源头（锁屏 + AOD）。
+     *
+     * 真机反编译：`com.oplus.keyguard.clock.base.ui.view.ClockTimeView` 在
+     * `ThemeClockHelper.isClockImg()` 为 true 时，逐个数字位调用
+     * `ThemeClockHelper.setTextImg(textView, "20", scale)`，而该方法实现是
+     *
+     *     textView.setText(null);
+     *     textView.setCompoundDrawables(左位图, null, 右位图, null);
+     *
+     * —— 先把文本清空、再贴两张数字图片。所以我们挂在 `tryUpdateText` 上的星月
+     * 文本会被紧接着清掉，屏幕上留下的是主题自带的真实数字图片。这就是
+     * 「桌面已生效、锁屏/AOD 仍显示真实时间」的根因（桌面走 digital 族，锁屏与
+     * AOD 走 base 族的图片数字路径）。
+     *
+     * 处理方式：命中睡眠时不执行原方法，改为把星月写进文本并清空四周 drawable，
+     * 视觉上与桌面卡片的时间替换保持一致；未命中则原样放行，图片数字自然恢复。
+     */
+    private fun hookThemeClockImg(cls: Class<*>, source: String): Int {
+        if (!hookedThemeImgClasses.add(cls)) return 0
+        val methods = Reflect.methodsNamed(cls, "setTextImg")
+        if (methods.isEmpty()) {
+            GLog.w("setTextImg 不存在于 ${cls.name}（来源 $source）")
+            return 0
+        }
+        var count = 0
+        for (method in methods) {
+            runCatching {
+                bag.add(
+                    xposed.hook(method)
+                        .setId("nocturne:personality:themeimg:$source")
+                        .intercept { chain ->
+                            val tvForLog = runCatching { chain.getArg(0) as? TextView }.getOrNull()
+                            if (GLog.isDebug) {
+                                GLog.d(
+                                    "setTextImg 回调 digits=\"${runCatching { chain.getArg(1) }.getOrNull()}\"" +
+                                        " mask=${shouldMask()} view=${tvForLog?.javaClass?.name}",
+                                )
+                            }
+                            if (!shouldMask()) {
+                                chain.proceed()
+                            } else {
+                                val tv = runCatching { chain.getArg(0) as? TextView }.getOrNull()
+                                val digits = runCatching {
+                                    chain.getArg(1) as? String
+                                }.getOrNull()
+                                if (tv == null || digits.isNullOrEmpty()) {
+                                    chain.proceed()
+                                } else {
+                                    val masked = Placeholder.mask(
+                                        digits,
+                                        Placeholder.minuteSeed(System.currentTimeMillis()),
+                                    )
+                                    if (GLog.isDebug) {
+                                        GLog.d("屏蔽主题图片数字：$digits → \"$masked\"（$source）")
+                                    }
+                                    // 原方法会把文本清空并贴图，这里改成反向操作：
+                                    // 清图 + 写入星月文本（StarMoonSpan 逐位继承原数字宽度）。
+                                    tv.setCompoundDrawables(null, null, null, null)
+                                    tv.text = StarMoonSpan.spanned(masked, digits)
+                                    null
+                                }
+                            }
+                        },
+                )
+                GLog.i("挂钩成功：主题图片数字 setTextImg（来源 $source → ${cls.name}）")
+                count++
+            }.onFailure { GLog.w("挂钩主题图片数字失败（来源 $source）", it) }
+        }
+        return count
+    }
     /**
      * 全局主题下贴图片数字的写入源头。命中睡眠时隐藏该数字位（alpha=0），
      * 否则恢复（alpha=1f）。每次刷新都会重贴所有数字位，因此解除睡眠后
@@ -152,6 +293,237 @@ class PersonalityClocksFeature(
             }.onFailure { GLog.w("挂钩图片数字失败（来源 $source）", it) }
         }
         return count
+    }
+
+    /** 已经挂过 text 族 SetContent 的 Class。 */
+    private val hookedTextContentClasses =
+        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
+
+    /** 已经挂过 gallery 族 refreshClockText 的 Class。 */
+    private val hookedGalleryClasses =
+        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
+
+    /**
+     * 把时间 TextView 的内容改写成星月（按数字段，冒号保留）。
+     * 原文用系统当前时间构造 "HH:mm"，供 StarMoonSpan 逐位继承宽度。
+     * 已是星月（同分钟）时跳过，避免无谓重绘。
+     */
+    private fun maskTimeInto(tv: TextView) {
+        val cal = Calendar.getInstance()
+        val orig = String.format(
+            "%02d:%02d",
+            cal.get(Calendar.HOUR_OF_DAY),
+            cal.get(Calendar.MINUTE),
+        )
+        val masked = Placeholder.mask(orig, Placeholder.minuteSeed(System.currentTimeMillis()))
+        if (tv.text?.toString() != masked) tv.text = StarMoonSpan.spanned(masked, orig)
+    }
+
+    /**
+     * text 族（锁屏 + AOD，`com.oplus.keyguard.clock.text.*`）。
+     *
+     * 该类家族不经过 `tryUpdateText`：`KeyguardSetContentHandler.applyTextClockTimeAndExtra`
+     * 直接 `localTime.setText(str)` 写 "HH:mm"，是第三方主题锁屏显示真实时间的直接原因
+     * （真机截图确认：锁屏 20:01 完整真实时间，日志里 digital 族的替换只作用于桌面卡片）。
+     *
+     * 采用 after 覆盖：原方法先写真实时间完成自身状态同步，命中睡眠再改写为星月；
+     * 解除睡眠时不覆盖，真实时间自然保留。
+     */
+    private fun hookTextContent(cls: Class<*>, source: String): Int {
+        if (!hookedTextContentClasses.add(cls)) return 0
+        val methods = Reflect.methodsNamed(cls, "applyTextClockTimeAndExtra")
+        if (methods.isEmpty()) {
+            GLog.w("applyTextClockTimeAndExtra 不存在于 ${cls.name}（来源 $source）")
+            return 0
+        }
+        var count = 0
+        for (method in methods) {
+            runCatching {
+                bag.add(
+                    xposed.hook(method)
+                        .setId("nocturne:personality:textcontent:$source")
+                        .intercept { chain ->
+                            val result = chain.proceed()
+                            if (shouldMask()) {
+                                // arg0 = com.oplus.keyguard.clock.text.ui.view.ClockViewRoot
+                                val root = runCatching { chain.getArg(0) }.getOrNull()
+                                val tv = runCatching {
+                                    root?.javaClass?.getMethod("getLocalTime")?.invoke(root) as? TextView
+                                }.getOrNull()
+                                if (tv != null) {
+                                    runCatching { maskTimeInto(tv) }
+                                        .onFailure { GLog.w("改写 text 族时间失败（$source）", it) }
+                                    if (GLog.isDebug) GLog.d("屏蔽 text 族时间（$source）")
+                                }
+                            }
+                            result
+                        },
+                )
+                GLog.i("挂钩成功：text 族时间（来源 $source → ${cls.name}）")
+                count++
+            }.onFailure { GLog.w("挂钩 text 族失败（来源 $source）", it) }
+        }
+        return count
+    }
+
+    /**
+     * gallery 族（灵感画廊时钟，`com.oplus.keyguard.clock.gallery.*`）。
+     *
+     * `BaseSingleClockView.refreshClockText` 同样直接 `timeTextView.setText(...)`，
+     * 绕过 tryUpdateText。after 阶段取 `getTimeTextView()` 改写成星月。
+     */
+    private fun hookGalleryClock(cls: Class<*>, source: String): Int {
+        if (!hookedGalleryClasses.add(cls)) return 0
+        val methods = Reflect.methodsNamed(cls, "refreshClockText")
+        if (methods.isEmpty()) {
+            GLog.w("refreshClockText 不存在于 ${cls.name}（来源 $source）")
+            return 0
+        }
+        var count = 0
+        for (method in methods) {
+            runCatching {
+                bag.add(
+                    xposed.hook(method)
+                        .setId("nocturne:personality:gallery:$source")
+                        .intercept { chain ->
+                            val result = chain.proceed()
+                            if (shouldMask()) {
+                                val self = chain.thisObject
+                                val tv = runCatching {
+                                    self?.javaClass?.getMethod("getTimeTextView")?.invoke(self) as? TextView
+                                }.getOrNull()
+                                if (tv != null) {
+                                    runCatching { maskTimeInto(tv) }
+                                        .onFailure { GLog.w("改写 gallery 时间失败（$source）", it) }
+                                    if (GLog.isDebug) GLog.d("屏蔽 gallery 族时间（$source）")
+                                }
+                            }
+                            result
+                        },
+                )
+                GLog.i("挂钩成功：gallery 族时间（来源 $source → ${cls.name}）")
+                count++
+            }.onFailure { GLog.w("挂钩 gallery 族失败（来源 $source）", it) }
+        }
+        return count
+    }
+
+    /** 已经挂过锁屏样式时钟（style.widgets）的 Class。 */
+    private val hookedStyleWidgetsClasses =
+        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
+
+    /** 已经挂过主题锁屏容器（StyleWidgetsContainer）的 Class。 */
+    private val hookedStyleContainers =
+        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
+
+    /**
+     * 第三方主题锁屏样式时钟（`com.oplus.keyguard.style.widgets`）。
+     *
+     * 这条路径既不是 personality 的 digital/text/gallery 族，也没有可替换的文本：
+     * 整个时钟由该插件的 `widgetsViewRoot` 渲染，宿主通过
+     * `setWidgetsContainerAlpha` / `setWidgetsVisibility` 控制显隐
+     * （真机反编译：KeyguardStyleWidgetsImpl，`getWidgetsViewRoot().setAlpha/ setVisibility`）。
+     * 因此在视图状态变化与显隐控制回调之后，按睡眠判定直接设整棵树 alpha：
+     * 命中 0f、解除 1f。alpha 是持久属性，宿主不会按分钟重置，锁屏停留期间保持。
+     */
+    private fun hookStyleWidgets(cls: Class<*>, source: String): Int {
+        if (!hookedStyleWidgetsClasses.add(cls)) return 0
+        var count = 0
+        for (name in STYLE_WIDGETS_METHODS) {
+            for (method in Reflect.methodsNamed(cls, name)) {
+                runCatching {
+                    bag.add(
+                        xposed.hook(method)
+                            .setId("nocturne:stylewidgets:$name:$source")
+                            .intercept { chain ->
+                                val result = chain.proceed()
+                                applyStyleWidgetsAlpha(chain.thisObject)
+                                result
+                            },
+                    )
+                    GLog.i("挂钩成功：锁屏样式时钟 $name（来源 $source）")
+                    count++
+                }.onFailure { GLog.w("挂钩锁屏样式时钟失败：$name（$source）", it) }
+            }
+        }
+        return count
+    }
+
+    /**
+     * 主题锁屏容器 `StyleWidgetsContainer`（personality 插件里的 FrameLayout 子类）。
+     *
+     * 2026-11-19 真机取证：uiautomator dump 显示屏幕上那串真实时间就是一个
+     * `android.widget.FrameLayout`（1272×2800 屏上 y=304..501、x=328..945），日期是
+     * 紧邻的另一个 FrameLayout（y=555..618），两者都挂在
+     * `com.android.systemui:id/keyguard_plugin_container` 下；而 `tryUpdateText`
+     * 改到的那批 `clock_time_*_txt` 全是 `shown=false` 的离屏控件。
+     * 也就是说主题锁屏不写文本、直接按主题资源绘制，唯一可用的办法是把容器整块
+     * 变透明。`onViewAdded` 是插件往容器里塞主题控件时的稳定回调，借它拿实例。
+     */
+    private fun hookStyleContainer(cls: Class<*>, source: String): Int {
+        if (!hookedStyleContainers.add(cls)) return 0
+        var count = 0
+        for (name in arrayOf("onViewAdded", "onViewRemoved")) {
+            for (method in Reflect.methodsNamed(cls, name)) {
+                runCatching {
+                    bag.add(
+                        xposed.hook(method)
+                            .setId("nocturne:stylecontainer:$name:$source")
+                            .intercept { chain ->
+                                val result = chain.proceed()
+                                val self = chain.thisObject as? View
+                                if (self != null) noteStyleContainer(self)
+                                result
+                            },
+                    )
+                    GLog.i("挂钩成功：主题锁屏容器 $name（来源 $source）")
+                    count++
+                }.onFailure { GLog.w("挂钩主题锁屏容器失败：$name（$source）", it) }
+            }
+        }
+        return count
+    }
+
+    /** 诊断用：已经打印过结构的主题锁屏容器。 */
+    private val notedContainers =
+        java.util.Collections.synchronizedSet(mutableSetOf<Int>())
+
+    private fun noteStyleContainer(v: View) {
+        if (!notedContainers.add(System.identityHashCode(v))) return
+        val rect = android.graphics.Rect()
+        val vis = runCatching { v.getGlobalVisibleRect(rect) }.getOrDefault(false)
+        val sb = StringBuilder(
+            "[容器] ${v.javaClass.name} hash=${System.identityHashCode(v)}" +
+                " rect=$rect visible=$vis shown=${v.isShown} alpha=${v.alpha}",
+        )
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) {
+                val c = v.getChildAt(i)
+                val cr = android.graphics.Rect()
+                val cv = runCatching { c.getGlobalVisibleRect(cr) }.getOrDefault(false)
+                sb.append("\n    child[$i] ${c.javaClass.name} rect=$cr visible=$cv shown=${c.isShown}")
+            }
+        }
+        var p = v.parent
+        var d = 0
+        while (p != null && d < 5) {
+            if (p is View) sb.append("\n    <- ${p.javaClass.name} id=0x${Integer.toHexString(p.id)}")
+            p = p.parent
+            d++
+        }
+        GLog.i(sb.toString())
+    }
+
+    private fun applyStyleWidgetsAlpha(self: Any?) {
+        if (self == null) return
+        val root = runCatching {
+            self.javaClass.getMethod("getWidgetsViewRoot").invoke(self) as? View
+        }.getOrNull() ?: return
+        val alpha = if (shouldMask()) 0f else 1f
+        if (root.alpha != alpha) {
+            root.alpha = alpha
+            if (GLog.isDebug) GLog.d("锁屏样式时钟 alpha=$alpha（${root.javaClass.name}）")
+        }
     }
 
     /**
@@ -196,12 +568,69 @@ class PersonalityClocksFeature(
                 }
                 hooked += hookImageDigit(imgCls, "fast-path:$pkg")
             }
+            // ③ text 族（第三方主题锁屏 / AOD）：直接 setText，绕过 tryUpdateText。
+            for (className in TEXT_CONTENT_CLASS_NAMES) {
+                val cls = runCatching { loader.loadClass(className) }.getOrNull()
+                if (cls == null) {
+                    if (GLog.isDebug) GLog.d("text 族类不存在：$pkg → $className")
+                    continue
+                }
+                hooked += hookTextContent(cls, "fast-path:$pkg")
+            }
+            // ④ gallery 族（灵感画廊时钟）：同样直接 setText。
+            for (className in GALLERY_CLOCK_CLASS_NAMES) {
+                val cls = runCatching { loader.loadClass(className) }.getOrNull()
+                if (cls == null) {
+                    if (GLog.isDebug) GLog.d("gallery 族类不存在：$pkg → $className")
+                    continue
+                }
+                hooked += hookGalleryClock(cls, "fast-path:$pkg")
+            }
+            // ⑤ 第三方/全局主题图片数字（锁屏 + AOD）：ThemeClockHelper.setTextImg。
+            for (className in THEME_IMG_CLASS_NAMES) {
+                val cls = runCatching { loader.loadClass(className) }.getOrNull()
+                if (cls == null) {
+                    if (GLog.isDebug) GLog.d("主题图片数字类不存在：$pkg → $className")
+                    continue
+                }
+                hooked += hookThemeClockImg(cls, "fast-path:$pkg")
+            }
+            // ⑥ 主题锁屏容器：屏幕上真实时间/日期的宿主（实测不再是文本控件）。
+            for (className in STYLE_CONTAINER_CLASS_NAMES) {
+                val cls = runCatching { loader.loadClass(className) }.getOrNull()
+                if (cls == null) {
+                    if (GLog.isDebug) GLog.d("主题锁屏容器类不存在：$pkg → $className")
+                    continue
+                }
+                hooked += hookStyleContainer(cls, "fast-path:$pkg")
+            }
+        }
+        // ⑥ 第三方主题锁屏样式时钟（独立包 com.oplus.keyguard.style.widgets）。
+        val styleLoader = runCatching {
+            ctx.createPackageContext(
+                STYLE_WIDGETS_PACKAGE,
+                Context.CONTEXT_INCLUDE_CODE or Context.CONTEXT_IGNORE_SECURITY,
+            ).classLoader
+        }.getOrNull()
+        if (styleLoader == null) {
+            if (GLog.isDebug) GLog.d("锁屏样式时钟插件不可用：$STYLE_WIDGETS_PACKAGE")
+        } else {
+            for (className in STYLE_WIDGETS_CLASS_NAMES) {
+                val cls = runCatching { styleLoader.loadClass(className) }.getOrNull()
+                if (cls == null) {
+                    if (GLog.isDebug) GLog.d("锁屏样式类不存在：$className")
+                    continue
+                }
+                hooked += hookStyleWidgets(cls, "fast-path:$STYLE_WIDGETS_PACKAGE")
+            }
         }
         if (hooked > 0) GLog.i("插件时钟拦截已挂 $hooked 个钩子（快速路径）")
         return hooked
     }
 
     companion object {
+        /** 诊断开关：打印被改写数字控件的身份/位置/父链（定位锁屏显示真实时间用）。 */
+        const val PROBE_VIEW = false
         /**
          * tryUpdateText 的全部实现（真机反编译确认）：
          * - common.widget.CustomizedTextView：公共基类（声明处）
@@ -228,6 +657,62 @@ class PersonalityClocksFeature(
          */
         val IMAGE_DIGIT_CLASS_NAMES = arrayOf(
             "com.oplus.keyguard.clock.digital.ui.view.ClockTimeView",
+        )
+
+        /**
+         * text 族时钟内容设置入口（锁屏 + AOD）。真机反编译确认
+         * `applyTextClockTimeAndExtra` 里直接 `localTime.setText(str)`，
+         * 不经过 tryUpdateText —— 第三方主题锁屏显示真实时间的直接原因。
+         */
+        val TEXT_CONTENT_CLASS_NAMES = arrayOf(
+            "com.oplus.keyguard.clock.text.ui.pipeline.handler.KeyguardSetContentHandler",
+        )
+
+        /**
+         * gallery 族（灵感画廊）时钟。`BaseSingleClockView.refreshClockText`
+         * 同样直接 `timeTextView.setText(...)`。
+         */
+        val GALLERY_CLOCK_CLASS_NAMES = arrayOf(
+            "com.oplus.keyguard.clock.gallery.view.BaseSingleClockView",
+        )
+
+        /**
+         * 第三方/全局主题的「图片数字」写入工具类（锁屏 + AOD）。
+         * `setTextImg` 会先 `setText(null)` 再贴数字位图，绕开一切文本钩子。
+         */
+        val THEME_IMG_CLASS_NAMES = arrayOf(
+            "com.oplus.keyguard.clock.base.util.ThemeClockHelper",
+        )
+
+        /**
+         * 主题锁屏容器：主题自绘的锁屏时钟/日期的宿主 FrameLayout 子类。
+         * uiautomator 实测屏幕上那串真实时间就是它（或它的子节点）画出来的。
+         */
+        val STYLE_CONTAINER_CLASS_NAMES = arrayOf(
+            "com.oplus.keyguard.clock.base.ui.view.StyleWidgetsContainer",
+        )
+
+        /**
+         * 第三方主题锁屏样式时钟插件（KeyguardStyleWidget.apk）。
+         * 独立于 personality 插件，通过 keyguard_plugin_container 注入宿主。
+         */
+        const val STYLE_WIDGETS_PACKAGE = "com.oplus.keyguard.style.widgets"
+
+        val STYLE_WIDGETS_CLASS_NAMES = arrayOf(
+            "com.oplus.keyguard.style.widgets.container.KeyguardStyleWidgetsImpl",
+        )
+
+        /**
+         * 锁屏样式时钟的视图状态/显隐回调（真机反编译：KeyguardStyleWidgetsImpl）。
+         * 覆盖：锁屏视图状态变化、宿主控制容器 alpha、容器显隐、uiState 切换（锁屏/AOD）、
+         * 时钟状态回调。这些回调之后统一按睡眠判定设 widgetsViewRoot 的 alpha。
+         */
+        val STYLE_WIDGETS_METHODS = arrayOf(
+            "onViewStateChanged",
+            "setWidgetsContainerAlpha",
+            "setWidgetsVisibility",
+            "onUiStateChanged",
+            "onClockStateChanged",
         )
 
         /**

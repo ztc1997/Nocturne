@@ -118,6 +118,10 @@ class NocturneModule : XposedModule() {
         feature.install()
         installPluginClocks(xposed, configSource, bag, classLoader, pluginOnce)
 
+        // 第三方主题：锁屏 / AOD 时钟由主题控件自绘（无文本可替换），
+        // 只能整块跳绘。详见 HostClockHider。
+        HostClockHider(xposed, classLoader, { configSource.snapshot }, bag).install()
+
         this.configSource = configSource
         this.hookBag = bag
     }
