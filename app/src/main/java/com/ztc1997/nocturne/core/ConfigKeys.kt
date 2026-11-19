@@ -16,6 +16,18 @@ object ConfigKeys {
     const val MANUAL_OVERRIDE = "manual_override"
     const val LOG_LEVEL = "log_level"
 
+    /** 跟随系统自动学习的作息（开启后上方两个时间只作为只读展示）。 */
+    const val FOLLOW_SYSTEM = "follow_system"
+
+    /**
+     * 设置页请求 hook 侧「立刻去查一次系统作息」。
+     *
+     * 值是一个请求序号（毫秒时间戳），hook 侧查到后把同一个序号写回
+     * [SystemSleepTime.ACK_KEY]，设置页据此结束"读取中"状态。
+     * 它不是配置项，不进 [ALL_KEYS]（不镜像本地、不登记待补写）。
+     */
+    const val SYSTEM_SLEEP_REQUEST = "system_sleep_request"
+
     // ---- 默认值 ----
     const val DEFAULT_ENABLED = true
     const val DEFAULT_SCHEDULE_ENABLED = true
@@ -23,6 +35,7 @@ object ConfigKeys {
     const val DEFAULT_WINDOW_END = "07:00"
     const val DEFAULT_LINK_DND = false
     const val DEFAULT_LOG_LEVEL = 2
+    const val DEFAULT_FOLLOW_SYSTEM = false
 
     /** 手动覆盖：自动（按时段/勿扰判定） */
     const val OVERRIDE_AUTO = -1
@@ -33,6 +46,6 @@ object ConfigKeys {
 
     val ALL_KEYS = setOf(
         ENABLED, SCHEDULE_ENABLED, WINDOW_START, WINDOW_END,
-        LINK_DND, MANUAL_OVERRIDE, LOG_LEVEL,
+        LINK_DND, MANUAL_OVERRIDE, LOG_LEVEL, FOLLOW_SYSTEM,
     )
 }

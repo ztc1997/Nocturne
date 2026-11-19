@@ -82,4 +82,41 @@ class SleepWindowTest {
         assertTrue(SleepWindow.parseHhMm("bad") == null)
         assertTrue(SleepWindow.parseHhMm("23:00") == 23 * 60)
     }
+
+    @Test
+    fun `跟随系统时用系统窗口`() {
+        val cfg = ConfigSnapshot(
+            scheduleEnabled = true,
+            windowStart = "23:00", windowEnd = "07:00",
+            followSystem = true,
+        )
+        val system = "01:00" to "05:00"
+        // 02:00 只在系统窗口内
+        assertTrue(SleepWindow.shouldMask(cfg, at(2, 0), dndActive = false, systemWindow = system))
+        // 06:00 只在手动窗口内（系统窗口已结束）
+        assertFalse(SleepWindow.shouldMask(cfg, at(6, 0), dndActive = false, systemWindow = system))
+    }
+
+    @Test
+    fun `跟随系统但取不到系统值时退回手动窗口`() {
+        val cfg = ConfigSnapshot(
+            scheduleEnabled = true,
+            windowStart = "23:00", windowEnd = "07:00",
+            followSystem = true,
+        )
+        assertTrue(SleepWindow.shouldMask(cfg, at(23, 30), dndActive = false, systemWindow = null))
+        assertFalse(SleepWindow.shouldMask(cfg, at(12, 0), dndActive = false, systemWindow = null))
+    }
+
+    @Test
+    fun `关闭跟随时忽略系统窗口`() {
+        val cfg = ConfigSnapshot(
+            scheduleEnabled = true,
+            windowStart = "12:00", windowEnd = "13:00",
+            followSystem = false,
+        )
+        val system = "01:00" to "05:00"
+        // 02:00 落在系统窗口里，但手动窗口是 12:00-13:00，且未跟随 → 不屏蔽
+        assertFalse(SleepWindow.shouldMask(cfg, at(2, 0), dndActive = false, systemWindow = system))
+    }
 }

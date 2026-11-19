@@ -15,14 +15,23 @@ import java.util.Calendar
  *  5. 其余 → 不屏蔽
  *
  * 时段支持跨午夜（例如 23:00 → 07:00）。
+ *
+ * 开启 [ConfigSnapshot.followSystem] 时，窗口由系统自动学习的作息提供
+ * （[systemWindow]）；取不到系统值就退回手动窗口，避免"开了跟随却完全不屏蔽"。
  */
 object SleepWindow {
 
     /**
      * @param nowMillis 当前时间毫秒
      * @param dndActive 当前勿扰/睡眠模式是否开启
+     * @param systemWindow 系统自动学习的 (入睡, 起床)；仅 followSystem 生效
      */
-    fun shouldMask(config: ConfigSnapshot, nowMillis: Long, dndActive: Boolean): Boolean {
+    fun shouldMask(
+        config: ConfigSnapshot,
+        nowMillis: Long,
+        dndActive: Boolean,
+        systemWindow: Pair<String, String>? = null,
+    ): Boolean {
         if (!config.enabled) return false
 
         when (config.manualOverride) {
@@ -32,11 +41,28 @@ object SleepWindow {
 
         if (config.linkDnd && dndActive) return true
 
-        if (config.scheduleEnabled && isInWindow(config.windowStart, config.windowEnd, nowMillis)) {
+        if (config.scheduleEnabled && isInEffectiveWindow(config, systemWindow, nowMillis)) {
             return true
         }
 
         return false
+    }
+
+    /** 当前生效的 (开始, 结束)：跟随系统且已取到系统值 → 用系统；否则用手动。 */
+    fun effectiveWindow(
+        config: ConfigSnapshot,
+        systemWindow: Pair<String, String>?,
+    ): Pair<String, String> =
+        if (config.followSystem && systemWindow != null) systemWindow
+        else config.windowStart to config.windowEnd
+
+    private fun isInEffectiveWindow(
+        config: ConfigSnapshot,
+        systemWindow: Pair<String, String>?,
+        nowMillis: Long,
+    ): Boolean {
+        val (start, end) = effectiveWindow(config, systemWindow)
+        return isInWindow(start, end, nowMillis)
     }
 
     /** 判断 nowMillis 是否落在 [start, end) 窗口内，支持跨午夜。 */
