@@ -4,8 +4,10 @@
 
 ## 项目是什么
 
-ColorOS 17（Android 17，一加 PLQ110）睡眠时段把系统各处时钟替换为占位符 `-` 的
+ColorOS 17（Android 17）睡眠时段把系统各处时钟替换为占位符 `-` 的
 LSPosed 模块。包名 `com.ztc1997.nocturne`，libxposed API 102，Kotlin。
+真机：一加 PLQ110（早期）与 PJD110（2026-11-19 起，ColorOS 17.0.0.100）；
+两台机器的时钟链路**不完全相同**，见下面第 4 条。
 
 ## 目录结构
 
@@ -93,10 +95,39 @@ ColorOS 17 时钟渲染分两套，都要拦：
      自检节拍补装，`ActivityThread.getSystemContext()` 兜底
    - **只在 SystemUI 进程挂**：launcher 的时钟走 personality 的星月占位，
      引擎钩子在那里既不需要也会互相打架
-   - 日期类（`DateTimeView` / `DateView` / `LunarView`）放行——用户要的是
-     「不显示时间」，日期与电量保持原样
+- 日期类（`DateTimeView` / `DateView` / `LunarView`）放行——用户要的是
+  「不显示时间」，日期与电量保持原样
+4. **桌面/锁屏的「图片数字」**（2026-11-19 换机到 PJD110 / ColorOS 17.0.0.100 后补全）：
+   这台机器上桌面与锁屏的时间都不是文本，而是主题的**数字位图**，两条不同链路：
+   - 桌面 `ClockTimeView#refreshTimeText` 走 imageMode →
+     `Utils.getHostClockNum(ctx, digit)` 取 0-9 位图 → `applyDigitDrawable` 贴成
+     compound drawable。**在取图源头**包成 `StarMoonDrawable`（`hookClockNum`），
+     intrinsic 沿用原图，宿主字宽/行高不变；星/月按「分钟种子 + 数字值」选，
+     与状态栏/文本链路图案一致。上一版在这里设 `alpha=0`，真机表现是**桌面时钟
+     整块消失**（用户报障），已废弃。
+   - 桌面分隔符：`Utils.getHostClockSymbol` 在 launcher 侧**给不出可见的图**
+     （hook 拿到非 null 但屏幕上空白），所以睡眠时段统一换成 `ColonDrawable`
+     自己补两个圆点，颜色/高度沿用刚量到的数字。
+   - 锁屏走 VariUIEngine 的**逐位 PNG**：每个数字是一个 `ImageElementView`，
+     `e` 字段是当前图片名（`time1/time_2.png`），模板表达式按分钟换图。
+     `hookEngineClocks` 里的 `drawImageElement` 只拦名字带 `time` 的数字图片
+     （日期/装饰放行），在原格子里画星月。**注意**：`TimeView` 与 `ImageNumber`
+     的钩子在这台机器上挂得上但一次不回调，别据此判断「锁屏没接管」。
+   - 两位数字图都有「格子比墨迹大/尖端顶格会被裁」的问题：`DigitInk` +
+     `StarMoonGlyph.inkFraction` 先量出原图墨迹包围盒，再按 `BITMAP_SHRINK` 收
+     一点余量，月牙宽度用 `MOON_WIDTH_BITMAP`（文本链路仍用 `MOON_WIDTH_TEXT`）。
 
 ### 血泪教训（勿重蹈）
+
+- **首选热重载，不要习惯性杀进程**：`module.prop` 里 `autoHotReload=true`，
+  模块已实现 `onHotReloading()→true` / `onHotReloaded()`（卸载旧句柄 + 重装）。
+  但**只有 `versionCode` 变化**时框架才会触发（同版本 `install -r` 静默无操作），
+  所以调试期每次安装都要 bump `versionCode`，发版时再收敛成正式号。
+  `onHotReloaded()` **必须重新 `GLog.install`**：新 generation 的静态状态是全新的，
+  不注入日志出口就只剩 `android.util.Log` 兜底（LSPosed 日志里什么都看不到，
+  曾误判成「热重载失败」——排查时记得 `adb logcat -s Nocturne`）。
+- **连续多次 `kill -9` SystemUI 后，LSPosed 会停止注入新进程**
+  （日志停在被杀那一刻）。`killall` 无效，只能 `adb reboot`。热重载能省掉这一步。
 
 - **切勿 hook `ClassLoader.loadClass`** 做"类加载看门狗"：在 loadClass 回调里再
   `xposed.hook()` 会触发框架类加载重入，真机实测直接把 LSPosed 打进安全模式
