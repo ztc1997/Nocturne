@@ -45,6 +45,13 @@ adb shell "su -c 'kill -9 $PIDS'"
 ```
 
 - 作用域：`com.android.systemui` + `com.android.launcher`（模块 App 内可改）
+- **签名**：口令放在项目根 `keystore.properties`（已 gitignore），
+  `app/build.gradle.kts` 读它给 **debug 与 release 都绑同一套 release 签名**。
+  设备上装的就是 release 签名版，debug 用默认 Android Debug 签名会直接
+  `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，而卸载重装会丢模块配置。文件缺失或
+  没填全时静默退回 Gradle 默认行为，不影响他人克隆后构建。
+  该文件用 UTF-8 读（storeFile 含中文路径），口令四项：`storeFile` /
+  `storePassword` / `keyAlias` / `keyPassword`。
 - **模块日志在 LSPosed 日志里，logcat 看不到**：
   `adb shell "su -c 'grep nocturne /data/adb/lspd/log/modules_*.log'"`
 - 设备 root：KernelSU，shell 有 su 权限
@@ -128,6 +135,21 @@ ColorOS 17 时钟渲染分两套，都要拦：
   曾误判成「热重载失败」——排查时记得 `adb logcat -s Nocturne`）。
 - **连续多次 `kill -9` SystemUI 后，LSPosed 会停止注入新进程**
   （日志停在被杀那一刻）。`killall` 无效，只能 `adb reboot`。热重载能省掉这一步。
+- **热重载只卸载钩子，不会取消 `Handler.postDelayed` 的节拍**：旧 generation 的
+  ticker 仍在主线程队列里循环，会按**旧代码**继续改视图（2026-11-19 实测：删掉
+  「整块 alpha/visibility 隐藏」后重载，日志里 `AOD 容器 visibility → 4` 照旧每
+  几十秒出现一次，锁屏/AOD 依然空白）。所以**验证「删除某类 hook」必须杀一次
+  宿主进程或重启设备**，否则测的是旧逻辑；新代码也拿不到旧实例去 stop。
+- **「整块隐藏」只能用在确认时钟就是该视图的场合**：`CustomOplusKeyguardStyleClock`
+  的 `setAlpha/setInnerAlpha → 0`、`AodBlackLayout#setVisibility → INVISIBLE`、
+  `style.widgets` 的 `widgetsViewRoot.alpha = 0` 在第三方主题上无效（时钟不是它们
+  画的），但在**官方主题**上就是屏幕上那块容器的真身——时间**连同日期**整块消失，
+  只剩电量与通知图标。三组已于 2026-11-19 删除，`HostClockHider` 现在只做引擎
+  时钟的绘制接管。要隐藏就画星月，不要留一块空白。
+- **引擎时钟绘制接管失败会静默空白**：`EngineClockPainter.draw` 取不到数字时返回
+  false，`hookEngineClocks` 直接 `return null` 不画（口径是「绝不回落真实时间」）。
+  现在失败会打一次「取不到数字，本块将空白」告警，看到这条说明该类布局与预期的
+  字段不符，要先补字段而不是继续调星月形状。
 
 - **切勿 hook `ClassLoader.loadClass`** 做"类加载看门狗"：在 loadClass 回调里再
   `xposed.hook()` 会触发框架类加载重入，真机实测直接把 LSPosed 打进安全模式
