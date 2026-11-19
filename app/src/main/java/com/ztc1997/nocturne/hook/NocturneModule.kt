@@ -31,9 +31,7 @@ class NocturneModule : XposedModule() {
     private var hookBag: HookBag? = null
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
-        GLog.install { priority, tag, msg, tr ->
-            if (tr != null) log(priority, tag, msg, tr) else log(priority, tag, msg)
-        }
+        installLogSink()
         GLog.level = ConfigSnapshot.DEFAULT.logLevel
 
         val process = param.processName
@@ -67,6 +65,11 @@ class NocturneModule : XposedModule() {
     }
 
     override fun onHotReloaded(param: HotReloadedParam) {
+        // 热重载不会重放 onModuleLoaded：新 generation 的 GLog 静态状态是全新的，
+        // 不重新注入日志出口就只剩 android.util.Log 兜底，LSPosed 日志里什么都看不到
+        // （2026-11-19 实测踩到，误以为热重载失败）。
+        installLogSink()
+        GLog.level = 3
         GLog.i("热重载完成，重装钩子（旧句柄 ${param.oldHookHandles.size} 个）")
         hookBag?.unhookAll()
         param.oldHookHandles.forEach { runCatching { it.unhook() } }
@@ -80,6 +83,13 @@ class NocturneModule : XposedModule() {
             return
         }
         install(cl)
+    }
+
+    /** 把框架日志接口接到 [GLog]（onModuleLoaded 与热重载后各注入一次）。 */
+    private fun installLogSink() {
+        GLog.install { priority, tag, msg, tr ->
+            if (tr != null) log(priority, tag, msg, tr) else log(priority, tag, msg)
+        }
     }
 
     private fun install(classLoader: ClassLoader) {
