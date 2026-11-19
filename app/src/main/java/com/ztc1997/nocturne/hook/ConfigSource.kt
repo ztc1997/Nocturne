@@ -79,6 +79,8 @@ class ConfigSource(private val xposed: XposedInterface) {
                 linkDnd = p.getBoolean(ConfigKeys.LINK_DND, ConfigKeys.DEFAULT_LINK_DND),
                 manualOverride = p.getInt(ConfigKeys.MANUAL_OVERRIDE, ConfigKeys.OVERRIDE_AUTO),
                 logLevel = p.getInt(ConfigKeys.LOG_LEVEL, ConfigKeys.DEFAULT_LOG_LEVEL),
+                followSystem = p.getBoolean(ConfigKeys.FOLLOW_SYSTEM, ConfigKeys.DEFAULT_FOLLOW_SYSTEM),
+                sleepRequest = p.getInt(ConfigKeys.SYSTEM_SLEEP_REQUEST, 0),
             )
         } catch (t: Throwable) {
             GLog.w("读取配置失败，沿用当前快照", t)

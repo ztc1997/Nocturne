@@ -121,9 +121,16 @@ class NocturneModule : XposedModule() {
         // 配置一变就更新日志等级；时钟判定每次回调都读最新快照，无需重装钩子。
         // 诊断期：hook 进程强制 debug 级（按调用日志是定位锁屏/AOD 问题的关键
         // 证据），问题解决后恢复为跟随配置。
-        configSource.onChanged = { _ -> GLog.level = 3 }
+        // 顺带：跟随系统被打开始、或设置页发来刷新请求时，立刻查一次系统作息。
+        configSource.onChanged = { fresh ->
+            GLog.level = 3
+            SystemSleepSource.onConfigChanged(fresh)
+        }
         configSource.open()
         GLog.level = 3
+        // 进程刚起来时先把系统作息抄一份到 Settings.Secure，
+        // 设置页打开就有值可展示，不用等第一次时钟刷新。
+        SystemSleepSource.onConfigChanged(configSource.snapshot)
 
         feature.install()
         installPluginClocks(xposed, configSource, bag, classLoader, pluginOnce)

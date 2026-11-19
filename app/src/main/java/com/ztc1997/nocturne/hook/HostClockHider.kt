@@ -46,11 +46,15 @@ class HostClockHider(
     private val bag: HookBag,
 ) {
 
-    private fun shouldMask(): Boolean = SleepWindow.shouldMask(
-        config(),
-        System.currentTimeMillis(),
-        if (config().linkDnd) DndState.isActive() else false,
-    )
+    private fun shouldMask(): Boolean {
+        val cfg = config()
+        return SleepWindow.shouldMask(
+            cfg,
+            System.currentTimeMillis(),
+            if (cfg.linkDnd) DndState.isActive() else false,
+            SystemSleepSource.window(cfg.followSystem),
+        )
+    }
 
     /** 受控的时钟视图（诊断用，仅记录宿主最近的请求，不改变行为）。 */
     private val handler = Handler(Looper.getMainLooper())

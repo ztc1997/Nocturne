@@ -200,6 +200,11 @@ class ClockMaskFeature(
     private fun shouldMask(): Boolean {
         val cfg = config()
         val dnd = if (cfg.linkDnd) DndState.isActive() else false
-        return SleepWindow.shouldMask(cfg, System.currentTimeMillis(), dnd)
+        return SleepWindow.shouldMask(
+            cfg,
+            System.currentTimeMillis(),
+            dnd,
+            SystemSleepSource.window(cfg.followSystem),
+        )
     }
 }

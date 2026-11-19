@@ -53,10 +53,15 @@ class PersonalityClocksFeature(
         return true
     }
 
-    private fun shouldMask(): Boolean = SleepWindow.shouldMask(
-        config(), System.currentTimeMillis(),
-        if (config().linkDnd) DndState.isActive() else false,
-    )
+    private fun shouldMask(): Boolean {
+        val cfg = config()
+        return SleepWindow.shouldMask(
+            cfg,
+            System.currentTimeMillis(),
+            if (cfg.linkDnd) DndState.isActive() else false,
+            SystemSleepSource.window(cfg.followSystem),
+        )
+    }
 
     /** 已经挂过 tryUpdateText 的 Class，避免同一 Class 被多路重复挂钩。 */
     private val hookedClasses = java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
