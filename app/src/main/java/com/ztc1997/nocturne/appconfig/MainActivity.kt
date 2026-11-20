@@ -503,7 +503,7 @@ private fun HeroCard(backendRes: Int) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                painter = painterResource(R.drawable.ic_placeholder_moon),
+                painter = painterResource(R.drawable.ic_placeholder_fake_time),
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onPrimaryContainer,
                 modifier = Modifier.padding(end = 12.dp),
