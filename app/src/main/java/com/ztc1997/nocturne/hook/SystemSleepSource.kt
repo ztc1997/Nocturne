@@ -41,7 +41,9 @@ object SystemSleepSource {
     /** 失败后的最小重试间隔，避免 provider 不可用时每分钟都打一次。 */
     private const val RETRY_MS = 60_000L
 
-    private val uri: Uri = Uri.parse("content://$AUTHORITY/$PATH")
+    // lazy：跟随系统关闭时 window() 第一行就返回，不必解析 Uri。既省一次启动开销，
+    // 也让该分支能在无 Android runtime 的 JVM 单测里跑（Uri.parse 是 android stub）。
+    private val uri: Uri by lazy { Uri.parse("content://$AUTHORITY/$PATH") }
 
     @Volatile
     private var cached: Pair<String, String>? = null
