@@ -65,7 +65,7 @@ app/src/main/
 1. 手机需 Root + LSPosed（框架需支持 Xposed API 102）。
 2. 安装 APK，在 LSPosed 中启用模块。
 3. **勾选作用域**：`com.android.systemui`、设备上实际的启动器包（本机为 `com.android.launcher`），使用景深/引擎壁纸时钟的主题还需勾选 `com.heytap.colorfulengine`。
-4. 调试期每次安装需 bump `versionCode` 才会触发热重载；发版时再收敛版本号。
+4. 调试期覆盖安装（`install -r`）即可触发热重载，无需改 `versionCode`。
 5. 打开"夜曲"App 配置时段与联动开关。
 
 > 未连接框架时，App 会把配置暂存在本地；首次在 LSPosed 勾选后自动迁移到远端。

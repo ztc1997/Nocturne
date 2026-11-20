@@ -153,8 +153,8 @@ ColorOS 17 时钟渲染分两套，都要拦：
   变量层（`VariableManager`）比各个 getter 更靠源头，量宽与绘制共用同一份值。
 - **首选热重载，不要习惯性杀进程**：`module.prop` 里 `autoHotReload=true`，
   模块已实现 `onHotReloading()→true` / `onHotReloaded()`（卸载旧句柄 + 重装）。
-  但**只有 `versionCode` 变化**时框架才会触发（同版本 `install -r` 静默无操作），
-  所以调试期每次安装都要 bump `versionCode`，发版时再收敛成正式号。
+  真机实测**同版本 `install -r` 覆盖安装即触发热重载**，不用 bump `versionCode`
+  （「必须改版本号才触发」是早期误记，2026-11-20 已按实测纠正）。
   `onHotReloaded()` **必须重新 `GLog.install`**：新 generation 的静态状态是全新的，
   不注入日志出口就只剩 `android.util.Log` 兜底（LSPosed 日志里什么都看不到，
   曾误判成「热重载失败」——排查时记得 `adb logcat -s Nocturne`）。
