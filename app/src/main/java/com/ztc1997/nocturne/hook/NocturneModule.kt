@@ -10,7 +10,6 @@ import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam
 import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 夜曲 —— 现代 Xposed API（libxposed API 102）入口。
@@ -33,7 +32,7 @@ class NocturneModule : XposedModule() {
     private var hostClockHider: HostClockHider? = null
 
     /** 进程级安装门闩：同一进程可能对多个 scope 包回调 onPackageReady，钩子只装一次。 */
-    private val installed = AtomicBoolean(false)
+    private val installGate = InstallGate()
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         installLogSink()
@@ -61,7 +60,7 @@ class NocturneModule : XposedModule() {
         // 但同一进程可能对多个 scope 包各回调一次（真机日志：systemui 内装了 4 遍），
         // 必须用进程级门闩挡住重复 install，否则会重复挂钩、重复注册配置监听，
         // 并留下无法卸载的旧 HookBag 句柄。
-        if (!installed.compareAndSet(false, true)) {
+        if (!installGate.tryInstall()) {
             GLog.i("进程内钩子已安装，跳过本次 onPackageReady")
             return
         }
@@ -89,7 +88,7 @@ class NocturneModule : XposedModule() {
         configSource?.close()
         configSource = null
 
-        installed.set(false)
+        installGate.reset()
         val cl = currentAppClassLoader()
         if (cl == null) {
             GLog.e("热重载后拿不到宿主 classLoader，重启宿主即可恢复")
