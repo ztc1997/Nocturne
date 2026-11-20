@@ -131,7 +131,7 @@ class NocturneModule : XposedModule() {
         SystemSleepSource.onConfigChanged(configSource.snapshot)
 
         feature.install()
-        installPluginClocks(xposed, configSource, bag, classLoader, pluginOnce)
+        installPluginClocks(xposed, bag, pluginFeature, classLoader, pluginOnce)
 
         // 第三方主题：锁屏 / AOD 时钟由主题控件自绘（无文本可替换），
         // 只能整块跳绘。详见 HostClockHider。
@@ -150,15 +150,18 @@ class NocturneModule : XposedModule() {
      */
     private fun installPluginClocks(
         xposed: XposedInterface,
-        configSource: ConfigSource,
         bag: HookBag,
+        pluginFeature: PersonalityClocksFeature,
         classLoader: ClassLoader,
         pluginOnce: java.util.concurrent.atomic.AtomicBoolean,
     ) {
+        // 立即路径：Application 已 attach，直接装。pluginFeature 是 install() 里
+        // 创建的唯一实例，triggerPlugin 与下面的延迟路径共用它 —— 三者共享同一套
+        // hookedClasses 幂等集合，避免多路触发时对同一 Class 重复挂钩。
         val immediate = DndState.currentAppContext()
         if (immediate != null) {
             if (pluginOnce.compareAndSet(false, true)) {
-                PersonalityClocksFeature(xposed, { configSource.snapshot }, bag).install(immediate)
+                pluginFeature.install(immediate)
             }
             return
         }
@@ -170,18 +173,20 @@ class NocturneModule : XposedModule() {
             GLog.w("找不到 Instrumentation.callApplicationOnCreate，插件时钟拦截跳过")
             null
         } ?: return
-        val once = java.util.concurrent.atomic.AtomicBoolean(false)
+        // 门闩独立于 pluginOnce：即便立即路径/triggerPlugin 已装过，延迟路径仍保留
+        // 兜底重试的机会（应对当时 Context 未就绪、install 内部失败）。多次调用同一
+        // 实例的 install() 是安全的——其内部 hookedClasses 幂等集合会对同一 Class 去重。
+        val deferredOnce = java.util.concurrent.atomic.AtomicBoolean(false)
         runCatching {
             bag.add(
                 xposed.hook(m)
                     .setId("nocturne:personality:deferred")
                     .intercept { chain ->
                         val r = chain.proceed()
-                        if (once.compareAndSet(false, true)) {
+                        if (deferredOnce.compareAndSet(false, true)) {
                             runCatching {
                                 DndState.currentAppContext()?.let {
-                                    PersonalityClocksFeature(xposed, { configSource.snapshot }, bag)
-                                        .install(it)
+                                    pluginFeature.install(it)
                                     GLog.i("插件时钟拦截已在 Application 创建后完成")
                                 }
                             }.onFailure { GLog.w("延迟安装插件时钟失败", it) }
