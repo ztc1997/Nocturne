@@ -10,6 +10,7 @@ import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam
 import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 夜曲 —— 现代 Xposed API（libxposed API 102）入口。
@@ -29,6 +30,10 @@ class NocturneModule : XposedModule() {
 
     private var configSource: ConfigSource? = null
     private var hookBag: HookBag? = null
+    private var hostClockHider: HostClockHider? = null
+
+    /** 进程级安装门闩：同一进程可能对多个 scope 包回调 onPackageReady，钩子只装一次。 */
+    private val installed = AtomicBoolean(false)
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         installLogSink()
@@ -53,13 +58,22 @@ class NocturneModule : XposedModule() {
 
     override fun onPackageReady(param: PackageReadyParam) {
         // 作用域由 LSPosed 依 scope.list / 用户勾选过滤，框架不会回调作用域外的包。
-        // 这里不再重复维护一份代码白名单：两处列表易不同步，且会挡住用户在框架里
-        // 新勾选的包（诊断期遗留的 SCOPE_PACKAGES 已移除）。
+        // 但同一进程可能对多个 scope 包各回调一次（真机日志：systemui 内装了 4 遍），
+        // 必须用进程级门闩挡住重复 install，否则会重复挂钩、重复注册配置监听，
+        // 并留下无法卸载的旧 HookBag 句柄。
+        if (!installed.compareAndSet(false, true)) {
+            GLog.i("进程内钩子已安装，跳过本次 onPackageReady")
+            return
+        }
         install(param.classLoader)
     }
 
     override fun onHotReloading(param: HotReloadingParam): Boolean {
-        GLog.i("收到热重载请求，允许")
+        GLog.i("收到热重载请求，清理自检节拍并允许")
+        // Handler.postDelayed 不在 HookHandle 管理范围内，热重载只卸载钩子不会
+        // 取消旧 generation 的 ticker；必须显式停掉，否则旧代码继续改视图。
+        hostClockHider?.close()
+        hostClockHider = null
         return true
     }
 
@@ -75,6 +89,7 @@ class NocturneModule : XposedModule() {
         configSource?.close()
         configSource = null
 
+        installed.set(false)
         val cl = currentAppClassLoader()
         if (cl == null) {
             GLog.e("热重载后拿不到宿主 classLoader，重启宿主即可恢复")
@@ -93,6 +108,9 @@ class NocturneModule : XposedModule() {
     private fun install(classLoader: ClassLoader) {
         val xposed: XposedInterface = this
 
+        // 防御：即便门闩失效，也先注销旧配置监听再换新，避免旧 generation 回调残留。
+        configSource?.close()
+        configSource = null
         val configSource = ConfigSource(xposed)
         val bag = HookBag()
 
@@ -154,8 +172,9 @@ class NocturneModule : XposedModule() {
 
         // 第三方主题：锁屏 / AOD 时钟由主题控件自绘（无文本可替换），
         // 只能整块跳绘。详见 HostClockHider。
-        HostClockHider(xposed, classLoader, { configSource.snapshot }, bag).install()
-
+        val hider = HostClockHider(xposed, classLoader, { configSource.snapshot }, bag)
+        hider.install()
+        hostClockHider = hider
 
         this.configSource = configSource
         this.hookBag = bag

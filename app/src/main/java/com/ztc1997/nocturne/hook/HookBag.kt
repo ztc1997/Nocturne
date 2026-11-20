@@ -11,7 +11,9 @@ import io.github.libxposed.api.XposedInterface
  * 热重载 / 重装配置时一次性卸载，避免旧钩子残留叠加。
  */
 class HookBag {
-    private val handles = mutableListOf<XposedInterface.HookHandle>()
+    private val handles = java.util.Collections.synchronizedList(
+        mutableListOf<XposedInterface.HookHandle>(),
+    )
 
     fun add(handle: XposedInterface.HookHandle) {
         handles.add(handle)

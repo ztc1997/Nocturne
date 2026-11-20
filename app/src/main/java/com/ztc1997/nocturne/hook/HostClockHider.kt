@@ -49,6 +49,7 @@ class HostClockHider(
 
     /** 受控的时钟视图（诊断用，仅记录宿主最近的请求，不改变行为）。 */
     private val handler = Handler(Looper.getMainLooper())
+    @Volatile
     private var ticking = false
 
     fun install(): Int {
@@ -72,6 +73,14 @@ class HostClockHider(
             2_000L,
         )
         return hooked
+    }
+
+    /** 停止自检节拍。热重载只卸载 HookHandle，不会取消 Handler 上的延迟任务。 */
+    fun close() {
+        ticking = false
+        handler.removeCallbacksAndMessages(null)
+        pluginContainer = null
+        GLog.i("宿主时钟自检节拍已停止")
     }
 
     // ---------------------------------------------------------------- 锁屏
@@ -246,11 +255,12 @@ class HostClockHider(
 
     private val ticker = object : Runnable {
         override fun run() {
+            if (!ticking) return
             // 引擎钩子不依赖锁屏容器：AOD 场景下 keyguard_plugin_container 根本
             // 不存在，如果只在 locate 成功时补装，AOD 就会整段漏拦（真机踩过）。
             runCatching { ensureEngineHook(DndState.currentAppContext()) }
             applyContainer()
-            handler.postDelayed(this, RECHECK_MS)
+            if (ticking) handler.postDelayed(this, RECHECK_MS)
         }
     }
 
