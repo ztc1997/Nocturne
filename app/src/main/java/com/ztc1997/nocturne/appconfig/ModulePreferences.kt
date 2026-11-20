@@ -131,25 +131,7 @@ object ModulePreferences {
     /** 当前生效配置的一份快照；后端未就绪时给默认值。 */
     fun load(): ConfigSnapshot {
         val p = active() ?: return ConfigSnapshot.DEFAULT
-        return runCatching {
-            ConfigSnapshot(
-                enabled = p.getBoolean(ConfigKeys.ENABLED, ConfigKeys.DEFAULT_ENABLED),
-                scheduleEnabled = p.getBoolean(
-                    ConfigKeys.SCHEDULE_ENABLED, ConfigKeys.DEFAULT_SCHEDULE_ENABLED,
-                ),
-                windowStart = p.getString(ConfigKeys.WINDOW_START, ConfigKeys.DEFAULT_WINDOW_START)
-                    ?: ConfigKeys.DEFAULT_WINDOW_START,
-                windowEnd = p.getString(ConfigKeys.WINDOW_END, ConfigKeys.DEFAULT_WINDOW_END)
-                    ?: ConfigKeys.DEFAULT_WINDOW_END,
-                linkDnd = p.getBoolean(ConfigKeys.LINK_DND, ConfigKeys.DEFAULT_LINK_DND),
-                manualOverride = p.getInt(ConfigKeys.MANUAL_OVERRIDE, ConfigKeys.OVERRIDE_AUTO),
-                logLevel = p.getInt(ConfigKeys.LOG_LEVEL, ConfigKeys.DEFAULT_LOG_LEVEL),
-                followSystem = p.getBoolean(
-                    ConfigKeys.FOLLOW_SYSTEM, ConfigKeys.DEFAULT_FOLLOW_SYSTEM,
-                ),
-                sleepRequest = p.getInt(ConfigKeys.SYSTEM_SLEEP_REQUEST, 0),
-            )
-        }.getOrDefault(ConfigSnapshot.DEFAULT)
+        return runCatching { ConfigSnapshot.from(p) }.getOrDefault(ConfigSnapshot.DEFAULT)
     }
 
     /** 写入配置（远端优先），返回是否成功。 */

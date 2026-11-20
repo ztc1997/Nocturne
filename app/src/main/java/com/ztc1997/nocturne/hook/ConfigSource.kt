@@ -69,19 +69,7 @@ class ConfigSource(private val xposed: XposedInterface) {
     private fun read(): ConfigSnapshot {
         val p = prefs ?: return snapshot
         return try {
-            ConfigSnapshot(
-                enabled = p.getBoolean(ConfigKeys.ENABLED, ConfigKeys.DEFAULT_ENABLED),
-                scheduleEnabled = p.getBoolean(ConfigKeys.SCHEDULE_ENABLED, ConfigKeys.DEFAULT_SCHEDULE_ENABLED),
-                windowStart = p.getString(ConfigKeys.WINDOW_START, ConfigKeys.DEFAULT_WINDOW_START)
-                    ?: ConfigKeys.DEFAULT_WINDOW_START,
-                windowEnd = p.getString(ConfigKeys.WINDOW_END, ConfigKeys.DEFAULT_WINDOW_END)
-                    ?: ConfigKeys.DEFAULT_WINDOW_END,
-                linkDnd = p.getBoolean(ConfigKeys.LINK_DND, ConfigKeys.DEFAULT_LINK_DND),
-                manualOverride = p.getInt(ConfigKeys.MANUAL_OVERRIDE, ConfigKeys.OVERRIDE_AUTO),
-                logLevel = p.getInt(ConfigKeys.LOG_LEVEL, ConfigKeys.DEFAULT_LOG_LEVEL),
-                followSystem = p.getBoolean(ConfigKeys.FOLLOW_SYSTEM, ConfigKeys.DEFAULT_FOLLOW_SYSTEM),
-                sleepRequest = p.getInt(ConfigKeys.SYSTEM_SLEEP_REQUEST, 0),
-            )
+            ConfigSnapshot.from(p)
         } catch (t: Throwable) {
             GLog.w("读取配置失败，沿用当前快照", t)
             snapshot

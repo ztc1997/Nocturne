@@ -1,5 +1,7 @@
 package com.ztc1997.nocturne.core
 
+import android.content.SharedPreferences
+
 /**
  * 配置快照。一次读取把所有配置项收进一个不可变对象，目标进程里的 hook 回调
  * 只读这一份，避免每次时钟刷新都跨进程读 SharedPreferences。
@@ -25,5 +27,28 @@ data class ConfigSnapshot(
 ) {
     companion object {
         val DEFAULT = ConfigSnapshot()
+
+        /**
+         * 从配置通道读取一份完整快照。模块 App 侧（remote prefs）与目标进程侧
+         * （框架托管的 remote prefs）共用这一份字段映射，避免两处各读一遍、加了
+         * 新字段漏改其中一处。
+         *
+         * 只依赖 Android SDK 的 [SharedPreferences]，两侧进程都持有；不碰 Xposed API。
+         */
+        fun from(p: SharedPreferences): ConfigSnapshot = ConfigSnapshot(
+            enabled = p.getBoolean(ConfigKeys.ENABLED, ConfigKeys.DEFAULT_ENABLED),
+            scheduleEnabled = p.getBoolean(
+                ConfigKeys.SCHEDULE_ENABLED, ConfigKeys.DEFAULT_SCHEDULE_ENABLED,
+            ),
+            windowStart = p.getString(ConfigKeys.WINDOW_START, ConfigKeys.DEFAULT_WINDOW_START)
+                ?: ConfigKeys.DEFAULT_WINDOW_START,
+            windowEnd = p.getString(ConfigKeys.WINDOW_END, ConfigKeys.DEFAULT_WINDOW_END)
+                ?: ConfigKeys.DEFAULT_WINDOW_END,
+            linkDnd = p.getBoolean(ConfigKeys.LINK_DND, ConfigKeys.DEFAULT_LINK_DND),
+            manualOverride = p.getInt(ConfigKeys.MANUAL_OVERRIDE, ConfigKeys.OVERRIDE_AUTO),
+            logLevel = p.getInt(ConfigKeys.LOG_LEVEL, ConfigKeys.DEFAULT_LOG_LEVEL),
+            followSystem = p.getBoolean(ConfigKeys.FOLLOW_SYSTEM, ConfigKeys.DEFAULT_FOLLOW_SYSTEM),
+            sleepRequest = p.getInt(ConfigKeys.SYSTEM_SLEEP_REQUEST, 0),
+        )
     }
 }
