@@ -6,7 +6,6 @@ import android.os.Looper
 import android.view.View
 import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.GLog
-import com.ztc1997.nocturne.core.SleepWindow
 import io.github.libxposed.api.XposedInterface
 
 /**
@@ -46,15 +45,7 @@ class HostClockHider(
     private val bag: HookBag,
 ) {
 
-    private fun shouldMask(): Boolean {
-        val cfg = config()
-        return SleepWindow.shouldMask(
-            cfg,
-            System.currentTimeMillis(),
-            if (cfg.linkDnd) DndState.isActive() else false,
-            SystemSleepSource.window(cfg.followSystem),
-        )
-    }
+    private fun shouldMask(): Boolean = MaskDecision.shouldMask(config)
 
     /** 受控的时钟视图（诊断用，仅记录宿主最近的请求，不改变行为）。 */
     private val handler = Handler(Looper.getMainLooper())

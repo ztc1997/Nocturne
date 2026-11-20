@@ -6,7 +6,6 @@ import android.widget.TextView
 import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.GLog
 import com.ztc1997.nocturne.core.Placeholder
-import com.ztc1997.nocturne.core.SleepWindow
 import io.github.libxposed.api.XposedInterface
 import java.util.Calendar
 
@@ -53,15 +52,7 @@ class PersonalityClocksFeature(
         return true
     }
 
-    private fun shouldMask(): Boolean {
-        val cfg = config()
-        return SleepWindow.shouldMask(
-            cfg,
-            System.currentTimeMillis(),
-            if (cfg.linkDnd) DndState.isActive() else false,
-            SystemSleepSource.window(cfg.followSystem),
-        )
-    }
+    private fun shouldMask(): Boolean = MaskDecision.shouldMask(config)
 
     /** 已经挂过 tryUpdateText 的 Class，避免同一 Class 被多路重复挂钩。 */
     private val hookedClasses = java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())

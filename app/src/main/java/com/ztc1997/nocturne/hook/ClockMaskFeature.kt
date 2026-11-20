@@ -6,7 +6,6 @@ import android.widget.TextView
 import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.GLog
 import com.ztc1997.nocturne.core.Placeholder
-import com.ztc1997.nocturne.core.SleepWindow
 import io.github.libxposed.api.XposedInterface
 import java.util.Calendar
 
@@ -196,15 +195,6 @@ class ClockMaskFeature(
 
     private fun hintFromClass(view: TextView): String = view.javaClass.simpleName
 
-    /** 当前是否应屏蔽。 */
-    private fun shouldMask(): Boolean {
-        val cfg = config()
-        val dnd = if (cfg.linkDnd) DndState.isActive() else false
-        return SleepWindow.shouldMask(
-            cfg,
-            System.currentTimeMillis(),
-            dnd,
-            SystemSleepSource.window(cfg.followSystem),
-        )
-    }
+    /** 当前是否应屏蔽。判定统一走 [MaskDecision]。 */
+    private fun shouldMask(): Boolean = MaskDecision.shouldMask(config)
 }
