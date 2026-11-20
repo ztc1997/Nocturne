@@ -32,7 +32,7 @@
     <string name="override_off">强制显示</string>
 
     <!-- 说明与提示 -->
-    <string name="info_placeholder">占位符：星月图案（☾/✦，每分钟随机变化）</string>
+    <string name="info_placeholder">占位符：不可能的假时间（如 77:77，四位同数字，每分钟变化）</string>
     <string name="error_time_format">时段格式应为 HH:mm，例如 23:00</string>
     <string name="save_success">已保存，目标进程即时生效</string>
     <string name="save_pending">已暂存本地，LSPosed 连接后自动同步</string>
