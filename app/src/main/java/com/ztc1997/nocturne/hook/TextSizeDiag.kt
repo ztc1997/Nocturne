@@ -26,6 +26,16 @@ class TextSizeDiag(
     private val xposed: XposedInterface,
     private val bag: HookBag,
 ) {
+
+    companion object {
+        /**
+         * 显式开关：默认关闭。排查字号/动画跳变时改为 true 并装 debug 包，
+         * 排查完改回 false，避免诊断 hook 常驻影响时钟回调。
+         */
+        private const val ENABLED = false
+
+        fun isEnabled(): Boolean = ENABLED
+    }
     /** 已挂过的 Class，幂等（同一 Class 只挂一次）。 */
     private val hooked = java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
 

@@ -1,6 +1,9 @@
 package com.ztc1997.nocturne.core
 
 /**
+ * [LEGACY] 2026-11-20 假时间方案（`77:77`）启用后，主链路不再使用星月字符或 span。
+ * 本类仅作为旧占位回退保留，勿在新 hook 中引用。
+ *
  * 星月占位符：时间数字的每一位替换为月亮 ☾ 或四芒星 ✦，按分钟确定性变化。
  *
  * 设计要点（2026-11-17 定稿，同日修订）：
@@ -21,7 +24,7 @@ package com.ztc1997.nocturne.core
  *     SET_TEXT 时/分字段        用系统当前时间构造 "%02d" 数字段
  * - 字形渲染（2026-11-17 二次修订）：状态栏/下拉菜单直接用纯字符占位（二者同源
  *   getSmallTime，宿主样式化会把 span 重建为纯 String，索性与下拉菜单观感一致）；
- *   插件时钟与锁屏 SET_TEXT 路径仍走 hook 层 StarMoonSpan 自绘。本类产出的
+ *   插件时钟与锁屏 SET_TEXT 路径曾走 hook 层 StarMoonSpan 自绘（现已停用）。本类产出的
  *   ☾/✦ 字符同时是绘制标记与兜底（span 丢失时退回字体回退渲染）。
  * - 已删除旧的自定义横线占位符（ConfigKeys.PLACEHOLDER），星月为唯一占位样式。
  *

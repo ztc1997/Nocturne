@@ -29,9 +29,9 @@ import io.github.libxposed.api.XposedInterface
  * 2026-11-19 第三方/全局主题适配：Launcher 进程在全局主题下
  * `ClockTimeView#refreshTimeText` 会把 `isImageDigitMode` 置 true，时间数字改由
  * `applyDigitDrawable` 贴主题图片数字，同时 `tryUpdateText` 只收到 null —— 上面的
- * 文本替换路径完全落空（真机现象：第三方主题桌面失效）。因此额外挂
- * `applyDigitDrawable`：命中睡眠时给写入目标 DigitalTimeView 设 alpha=0（隐藏图片
- * 数字），解除后在下一次刷新恢复 1f，与 AOD 的无文本隐藏策略一致。
+ * 文本替换路径完全落空（真机现象：第三方主题桌面失效）。因此改为在取图源头
+ * `Utils.getHostClockNum` 把真实数字换成假数字，宿主仍取主题自己的位图排版；
+ * `applyDigitDrawable` 上只保留 debug 日志，行为透明。
  * 该分支只在 Launcher 生效（SystemUI 里 isImageDigitMode 恒为 false）。
  */
 class PersonalityClocksFeature(
@@ -198,7 +198,8 @@ class PersonalityClocksFeature(
      * 观感与主题原生完全一致，不需要任何自绘（这是本方案相比星月自绘最大的收益）。
      *
      * 逐位调用天然对应"每一位"：宿主按 时十/时个/分十/分个 依次取图，
-     * 每一位的假值由 (分钟种子, 原数字) 决定，与整串 mask 的结果一致。
+     * 每一位的假值只由分钟种子决定（[FakeTime.digit] 刻意忽略原数字），
+     * 与整串 mask 的结果一致。
      *
      * 只在睡眠时段替换；平时原样返回，主题位图不受影响。
      */
@@ -245,7 +246,7 @@ class PersonalityClocksFeature(
      * 时间分隔符的取图源头（`Utils.getHostClockSymbol(context)`）。
      *
      * 真机实测：桌面那套模板在 launcher 侧取不到分隔符图，返回 null，
-     * `applyDigitDrawable` 见到 null drawable 直接 return —— 数字换成星月之后
+     * `applyDigitDrawable` 见到 null drawable 直接 return —— 数字换成假数字位图之后
      * 冒号位置就是空的（用户 2026-11-19 反馈「桌面上的冒号没了」）。
      * 所以在源头兜底：主题没给就返回自己画的冒号（见 [ColonDrawable]），
      * 主题给了就原样用它的。
@@ -329,7 +330,7 @@ class PersonalityClocksFeature(
             return 0
         }
         // 临时诊断（收口删除）：字号/RT 通道/文本拷贝追踪，仅 debug 构建。
-        if (com.ztc1997.nocturne.BuildConfig.DEBUG) {
+        if (com.ztc1997.nocturne.BuildConfig.DEBUG && TextSizeDiag.isEnabled()) {
             runCatching { TextSizeDiag(xposed, bag).install(ctx) }
                 .onFailure { GLog.w("字号诊断安装失败", it) }
         }
@@ -364,7 +365,7 @@ class PersonalityClocksFeature(
                 }
                 hooked += hookImageDigit(imgCls, "fast-path:$pkg")
             }
-            // ③ 图片数字的取图源头：换成星月 drawable（桌面不消失、与锁屏一致）。
+            // ③ 图片数字的取图源头：换成假数字位图（沿用主题字形，桌面不消失）。
             for (className in NUM_CLASS_NAMES) {
                 val numCls = runCatching { loader.loadClass(className) }.getOrNull()
                 if (numCls == null) {

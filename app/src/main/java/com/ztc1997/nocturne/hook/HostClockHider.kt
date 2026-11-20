@@ -9,7 +9,7 @@ import com.ztc1997.nocturne.core.GLog
 import io.github.libxposed.api.XposedInterface
 
 /**
- * 第三方主题下锁屏 / AOD 时钟的星月占位。
+ * 第三方主题下锁屏 / AOD 时钟的假时间注入接管（旧版本为星月占位）。
  *
  * 屏幕上那串真实时间到底由谁画（真机逐层取证，2026-11-19，结论推翻过三次）：
  *  - 不是 personality 插件的 digital / text / gallery 族：`tryUpdateText` 只改到
@@ -267,22 +267,5 @@ class HostClockHider(
     companion object {
         /** 引擎钩子补装的自检间隔。 */
         private const val RECHECK_MS = 20_000L
-
-        /**
-         * UIEngine / EGView 的时间控件。
-         *
-         * 只留**确实有绘制方法**的两个类（真机日志佐证：其余四个类
-         * `AnalogClockElementView` / `TextClockElementView` / `TimeTextView` /
-         * `AodDisplayTextView` 都没有 draw/onDraw(Canvas)，挂不上，纯噪音已删）。
-         *
-         * **不含日期类**（用户 2026-11-19 明确要求）：`DateTimeView`、`DateView`、
-         * `LunarView` 一律放行，锁屏/AOD 上的「11月19日 星期四」保持原样。
-         */
-        private val ENGINE_CLOCK_CLASSES = arrayOf(
-            EngineClockPainter.ZPLUS_CLASS,   // 锁屏：0-9 位图（旧模板）
-            EngineClockPainter.EG_CLASS,      // AOD：两行 drawText
-            EngineClockPainter.ZPLUS_IMAGE_NUMBER_CLASS,   // 模板数字元素（表达式 + 位图）
-            EngineClockPainter.ZPLUS_IMAGE_ELEMENT_CLASS,  // 模板逐位 PNG（换机后锁屏实测）
-        )
     }
 }

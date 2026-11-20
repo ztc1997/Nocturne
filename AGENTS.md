@@ -218,20 +218,9 @@ ColorOS 17 时钟渲染分两套，都要拦：
   `ConfigKeys`；hook 回调每帧读 `ConfigSource.snapshot`，不缓存
 - core/ 层禁止 import 任何 `io.github.libxposed.api` 类型
 - 新 hook 目标先进 `ClockTargets` 候选表再实现
-- 占位符 = 星月图案（`core/Placeholder.kt`：每一位 ☾/✦（✦=U+2726 四芒星，
-  2026-11-17 由五角星 ★ 改来），按分钟确定性随机
-  `(分钟种子, 数字值) → splitmix64 → 1 bit`；**散列不含段内下标**——插件时钟
-  是逐位写入（每位独立 TextView），状态栏是整串替换，含下标则两图案必然
-  不同；去掉后跨面/跨 12-24 小时制天然一致，代价是重复数字整串同图案）。
-  纯函数无状态，双进程自然一致。渲染分两路：**状态栏/下拉菜单（getSmallTime
-  RETURN_VALUE）用纯字符占位，不挂 span**（同源文本，下拉菜单宿主会把 span
-  重建为纯 String，索性两处观感一致）；插件时钟与锁屏 SET_TEXT 路径走
-  `hook/StarMoonSpan.kt`
-  （ReplacementSpan 自绘实芯四芒星 + 实芯月牙：高度按数字 "0" 的 cap band
-  对齐、宽度逐位继承原数字 advance（spanned(masked, original)，original 是
-  被替换文本），行度量保持主字体不变，解决 ☾/✦ 字体回退导致的桌面下移/
-  锁屏上移与星月高低差）；span 被宿主链路重建丢失时退回字体回退渲染兜底。
-  旧自定义横线占位符（`PLACEHOLDER` 配置键）已于 2026-11-17 删除，
-  星月是唯一占位样式。各拦截面统一按"数字段"调 `Placeholder.mask()`：
-  状态栏整串按非数字字符分段，插件时钟写入本身就是数字段，SET_TEXT 的
-  时/分字段用系统当前时间构造 `%02d` 数字段
+- 占位符 = 假时间 `77:77`（`core/FakeTime.kt`）：四位同值，取值 6..9，按分钟
+  确定性生成且相邻分钟必变；`digit(seed, original)` 刻意忽略原数字，所以整串
+  替换与逐位写入天然对齐，也无法反推真实时间。宿主用自己的字形/位图/颜色
+  重新排版，不再自绘。`core/Placeholder.kt`、`hook/StarMoonSpan.kt`、
+  `hook/StarMoonDrawable.kt`、`hook/EngineClockPainter.kt` 均为 [LEGACY]
+  回退代码，勿在新链路引用

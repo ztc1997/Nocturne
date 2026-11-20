@@ -10,6 +10,8 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
+ * [LEGACY] 假时间方案启用后不再进入主绘制链路，仅为旧 StarMoonSpan/Drawable 回退保留。
+ *
  * 星月字形的唯一绘制实现。
  *
  * 为什么抽出来（2026-11-19）：星月有两个完全不同的落点——

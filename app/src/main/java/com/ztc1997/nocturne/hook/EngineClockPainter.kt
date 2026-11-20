@@ -11,6 +11,9 @@ import kotlin.math.max
 import kotlin.math.sqrt
 
 /**
+ * [LEGACY] 2026-11-20 引擎时钟改由 EngineClockInjector 喂假数字，由宿主自绘；
+ * 本绘制器不再被调用，仅留作回退参考，勿在新链路引用。
+ *
  * 第三方主题锁屏 / AOD 时钟的「星月占位」绘制。
  *
  * 背景（2026-11-19 真机取证）：这两处的时钟不是文本控件，宿主也完全不认

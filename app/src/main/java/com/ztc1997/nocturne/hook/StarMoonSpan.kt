@@ -9,6 +9,8 @@ import com.ztc1997.nocturne.core.Placeholder
 import kotlin.math.max
 
 /**
+ * [LEGACY] 2026-11-20 起主链路改用假时间，宿主用自身字形排版；本 span 仅留作回退。
+ *
  * 星月自绘 span（方案 2，2026-11-17；同日二次修订；2026-11-19 抽出字形）。
  *
  * 背景：时钟专用字体只覆盖数字/冒号，☾/✦ 走字体回退后（a）垂直位置随各面

@@ -13,6 +13,8 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
+ * [LEGACY] 假时间方案改在取图源头换数字，本度量与 StarMoonDrawable 仅留作回退。
+ *
  * 主题数字位图 → 星月的公共度量。
  *
  * 桌面与锁屏的数字位图都是「格子比墨迹大」：175×215 的格子里真实数字往往只占
@@ -103,6 +105,7 @@ object DigitInk {
  * 布局不会动），绘制时在原数字**墨迹的包围盒**里画星月 —— 与主题数字同高、同位置、
  * 同留白。颜色从原位图按 alpha 加权取样；星/月的选择用与桌面文本链路同一份散列
  * （分钟种子 + 数字值），因此同一分钟桌面与锁屏图案一致。
+ * [LEGACY] 主链路已不在取图源头包星月 drawable，类仅留作回退。
  */
 class StarMoonDrawable(
     private val origin: Drawable,
