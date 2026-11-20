@@ -1,7 +1,7 @@
 # 夜曲 · ColorOS 17 时钟 hook 点校准与方案
 
 > 基于对四个真机提取 APK 的静态反编译（jadx 1.5.6 / aapt / dexdump），非推测。
-> 目标设备：OPPO / 一加 ColorOS 17（Android 16/17，API 35–37）。
+> 目标设备：OPPO / 一加 ColorOS 17（Android 17，API 37）。
 > 补充样本：`灵感组件_17.00.030.apk` 已单独分析，结论见 §2.5。
 
 ## 1. 样本事实

@@ -8,7 +8,7 @@
 
 假数字按分钟确定性生成（6~9），相邻分钟必变、无法反推真实时间，逐位写入与整串替换天然一致。详见 [FAKE_CLOCK_PLAN.md](FAKE_CLOCK_PLAN.md)。
 
-主要兼容 **ColorOS 17**（OPPO / 一加 / realme 同底座）。
+仅支持 **ColorOS 17 / Android 17（API 37）**（OPPO / 一加 / realme 同底座）；`minSdk` 与 `targetSdk` 均为 37。
 
 ### 触发策略（优先级从高到低）
 

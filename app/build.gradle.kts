@@ -40,7 +40,7 @@ android {
 
     defaultConfig {
         applicationId = "com.ztc1997.nocturne"
-        minSdk = 26
+        minSdk = 37
         targetSdk = 37
         versionCode = 22
         versionName = "0.1.9"
