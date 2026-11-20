@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -134,39 +133,38 @@ private val OVERRIDE_OPTIONS = listOf(
 )
 
 /**
- * 设置页的表单状态。
+ * 设置页的表单状态：始终是存储中生效值的镜像，没有"未保存的编辑"中间态。
  *
  * 界面值不能在组合期"读一次就记住"：框架的 binder 是异步注入的，
  * 首帧往往早于连接，那时读到的是本地镜像（首次安装就是空文件 → 默认值）。
- * 连接/推送到来时必须重新读，否则界面永远停在默认参数上。
+ * 连接/推送/本地写入到来时必须重新读，否则界面停在旧值上。
  *
- * 反过来，用户已经在界面上改过东西（[dirty]）时不能被后台值覆盖，
- * 否则刚拨好的开关会在配置推送到达的一瞬间被打回去。
+ * 每个开关直接写入存储后即生效。控件是受控的（checked 取自 [values]），
+ * 只有写入成功后 [values] 才更新；写失败时保持原值，视觉上自动回滚。
  */
 private class SettingsForm(initial: ConfigSnapshot) {
     var values by mutableStateOf(initial)
         private set
-    var dirty by mutableStateOf(false)
-        private set
     var backend by mutableStateOf(ModulePreferences.backend())
         private set
 
-    fun mutate(transform: (ConfigSnapshot) -> ConfigSnapshot) {
-        values = transform(values)
-        dirty = true
+    /**
+     * 写入单个键并立即生效；返回是否成功（失败时调用方给提示，界面保持原值）。
+     *
+     * 写远端时 SharedPreferences 的变更监听也会触发 [refresh]，这里显式再刷一次
+     * 是为了覆盖写本地的情况（本地 editor 没注册监听，不会自己回调）。两次读到的
+     * 都是刚提交的新值，幂等。
+     */
+    fun write(block: ModulePreferences.EditorScope.() -> Unit): Boolean {
+        val ok = ModulePreferences.edit(block)
+        refresh()
+        return ok
     }
 
-    /** 保存成功后：以存储中的值为准（暂存本地时也与远端最终值一致），恢复跟随。 */
-    fun onSaved() {
-        dirty = false
-        values = ModulePreferences.load()
-        backend = ModulePreferences.backend()
-    }
-
-    /** 配置源变化（后端连接/断开、远端推送）：只在用户没动手时刷新界面。 */
+    /** 以存储中的值为准刷新界面（写入后、后端连接/断开、远端推送）。 */
     fun refresh() {
         backend = ModulePreferences.backend()
-        if (!dirty) values = ModulePreferences.load()
+        values = ModulePreferences.load()
     }
 }
 
@@ -230,13 +228,15 @@ private fun SettingsScreen() {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     // 点击回调不是 Composable 上下文，提前把文案解析好。
-    val invalidTimeMessage = stringResource(R.string.error_time_format)
-    val savedMessage = stringResource(R.string.save_success)
-    val pendingMessage = stringResource(R.string.save_pending)
-    val saveFailedMessage = stringResource(R.string.save_failed)
+    val applyFailedMessage = stringResource(R.string.apply_failed)
 
     fun showSnackbar(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    /** 写入单个设置项；只有写失败（后端未就绪）才提示，成功时静默生效。 */
+    fun applySetting(block: ModulePreferences.EditorScope.() -> Unit) {
+        if (!form.write(block)) showSnackbar(applyFailedMessage)
     }
 
     Scaffold(
@@ -267,18 +267,18 @@ private fun SettingsScreen() {
                     SettingSwitchRow(
                         headline = stringResource(R.string.setting_enabled),
                         checked = values.enabled,
-                        onCheckedChange = { on -> form.mutate { it.copy(enabled = on) } },
+                        onCheckedChange = { on -> applySetting { putBoolean(ConfigKeys.ENABLED, on) } },
                     )
                     SettingSwitchRow(
                         headline = stringResource(R.string.setting_schedule),
                         checked = values.scheduleEnabled,
-                        onCheckedChange = { on -> form.mutate { it.copy(scheduleEnabled = on) } },
+                        onCheckedChange = { on -> applySetting { putBoolean(ConfigKeys.SCHEDULE_ENABLED, on) } },
                     )
                     SettingSwitchRow(
                         headline = stringResource(R.string.setting_follow_system),
                         supporting = stringResource(R.string.setting_follow_system_desc),
                         checked = values.followSystem,
-                        onCheckedChange = { on -> form.mutate { it.copy(followSystem = on) } },
+                        onCheckedChange = { on -> applySetting { putBoolean(ConfigKeys.FOLLOW_SYSTEM, on) } },
                     )
                     Row(
                         modifier = Modifier
@@ -315,7 +315,7 @@ private fun SettingsScreen() {
                     SettingSwitchRow(
                         headline = stringResource(R.string.setting_link_dnd),
                         checked = values.linkDnd,
-                        onCheckedChange = { on -> form.mutate { it.copy(linkDnd = on) } },
+                        onCheckedChange = { on -> applySetting { putBoolean(ConfigKeys.LINK_DND, on) } },
                     )
                 }
             }
@@ -335,7 +335,7 @@ private fun SettingsScreen() {
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                             ),
                             modifier = Modifier.clickable {
-                                form.mutate { it.copy(manualOverride = option.value) }
+                                applySetting { putInt(ConfigKeys.MANUAL_OVERRIDE, option.value) }
                             },
                         )
                     }
@@ -344,40 +344,6 @@ private fun SettingsScreen() {
             item {
                 InfoText(stringResource(R.string.info_placeholder))
             }
-            item {
-                Button(
-                    onClick = {
-                        val snapshot = form.values
-                        if (SleepWindow.parseHhMm(snapshot.windowStart) == null ||
-                            SleepWindow.parseHhMm(snapshot.windowEnd) == null
-                        ) {
-                            showSnackbar(invalidTimeMessage)
-                            return@Button
-                        }
-                        val ok = ModulePreferences.edit {
-                            putBoolean(ConfigKeys.ENABLED, snapshot.enabled)
-                            putBoolean(ConfigKeys.SCHEDULE_ENABLED, snapshot.scheduleEnabled)
-                            putString(ConfigKeys.WINDOW_START, snapshot.windowStart)
-                            putString(ConfigKeys.WINDOW_END, snapshot.windowEnd)
-                            putBoolean(ConfigKeys.LINK_DND, snapshot.linkDnd)
-                            putInt(ConfigKeys.MANUAL_OVERRIDE, snapshot.manualOverride)
-                            putBoolean(ConfigKeys.FOLLOW_SYSTEM, snapshot.followSystem)
-                        }
-                        if (ok) form.onSaved()
-                        showSnackbar(
-                            when {
-                                !ok -> saveFailedMessage
-                                // 框架还没连上：值已暂存本地，连接后自动补写远端
-                                ModulePreferences.backend() != ModulePreferences.Backend.REMOTE -> pendingMessage
-                                else -> savedMessage
-                            },
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(stringResource(R.string.action_save))
-                }
-            }
         }
     }
 
@@ -385,7 +351,7 @@ private fun SettingsScreen() {
         TimeSelectionDialog(
             initialValue = values.windowStart,
             fallbackValue = ConfigKeys.DEFAULT_WINDOW_START,
-            onConfirm = { picked -> form.mutate { it.copy(windowStart = picked) } },
+            onConfirm = { picked -> applySetting { putString(ConfigKeys.WINDOW_START, picked) } },
             onDismiss = { showStartPicker = false },
         )
     }
@@ -393,7 +359,7 @@ private fun SettingsScreen() {
         TimeSelectionDialog(
             initialValue = values.windowEnd,
             fallbackValue = ConfigKeys.DEFAULT_WINDOW_END,
-            onConfirm = { picked -> form.mutate { it.copy(windowEnd = picked) } },
+            onConfirm = { picked -> applySetting { putString(ConfigKeys.WINDOW_END, picked) } },
             onDismiss = { showEndPicker = false },
         )
     }
