@@ -159,8 +159,6 @@ class HostClockHider(
         return pluginContainer
     }
 
-    private var containerLogged = false
-
     /**
      * UIEngine / EGView 锁屏与 AOD 时钟的绘制接管。
      *
@@ -293,51 +291,7 @@ class HostClockHider(
     private fun applyContainer() {
         val c = locatePluginContainer() ?: return
         runCatching { ensureEngineHook(c.context) }
-        if (!containerLogged && (c as? android.view.ViewGroup)?.childCount ?: 0 > 0) {
-            containerLogged = true
-            GLog.i("锁屏引擎容器就绪：${c.javaClass.simpleName} 子节点数=${(c as? android.view.ViewGroup)?.childCount}")
-        }
-        dumpPluginTree(c)
     }
-
-    /** 诊断用：已经打印过结构的容器。 */
-    private val notedTrees = java.util.Collections.synchronizedSet(mutableSetOf<Int>())
-
-    /**
-     * 诊断：把锁屏插件容器下的控件树按**真实类名**打出来。
-     *
-     * 为什么需要（2026-11-19 换机后锁屏时间没被屏蔽）：uiautomator dump 会把这些
-     * 自定义容器的类名统一报成 `android.widget.FrameLayout`
-     * （`getAccessibilityClassName` 被覆写），静态也只能猜到候选类。只有在本进程
-     * 里读 `javaClass.name` 才能确认屏幕上那串数字到底由哪个类的哪个 View 画。
-     */
-    private fun dumpPluginTree(container: View) {
-        if (!GLog.isDebug || !shouldMask()) return
-        if (!container.isAttachedToWindow) return
-        if (!notedTrees.add(System.identityHashCode(container))) return
-        val lines = ArrayList<String>(128)
-        val loaderHashes = HashMap<String, Int>()
-        var budget = 120
-        fun walk(v: View, depth: Int) {
-            if (budget <= 0 || depth > 7) return
-            budget--
-            val rect = android.graphics.Rect()
-            runCatching { v.getGlobalVisibleRect(rect) }
-            val name = v.javaClass.name
-            val loader = loaderHashes.getOrPut(name) {
-                System.identityHashCode(v.javaClass.classLoader)
-            }
-            lines.add(
-                "  ".repeat(depth) + name +
-                    " rect=$rect shown=${v.isShown} alpha=${v.alpha} cl=$loader",
-            )
-            val g = v as? android.view.ViewGroup ?: return
-            for (i in 0 until g.childCount) walk(g.getChildAt(i), depth + 1)
-        }
-        walk(container, 0)
-        GLog.i("[锁屏树]\n" + lines.joinToString("\n"))
-    }
-
 
     // ------------------------------------------------------------- 状态自检
 

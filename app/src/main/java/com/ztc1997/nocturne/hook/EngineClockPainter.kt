@@ -112,7 +112,6 @@ object EngineClockPainter {
             star = StarMoonGlyph.isStar(seed, digit),
             moonWidth = StarMoonGlyph.MOON_WIDTH_BITMAP,
         )
-        logOnce("锁屏数字位", null)
         return true
     }
 
@@ -167,7 +166,6 @@ object EngineClockPainter {
             )
             x += w
         }
-        logOnce("锁屏数字", null)
         return true
     }
 
@@ -220,7 +218,6 @@ object EngineClockPainter {
             x = drawZplusDigit(canvas, digits, minuteText, 0, x, space, seed)
             drawZplusDigit(canvas, digits, minuteText, 1, x, space, seed)
         }
-        logOnce("锁屏", digits)
         return true
     }
 
@@ -354,7 +351,6 @@ object EngineClockPainter {
                 (Reflect.findField(cls, "mExtraLineGap")?.getFloat(view) ?: 0f)
             drawGlyphRun(canvas, paint, first, left, baseline0, capH, seed)
             drawGlyphRun(canvas, paint, second, left, baseline0 + step, capH, seed)
-            logOnce("AOD", null)
             return true
         }
 
@@ -363,7 +359,6 @@ object EngineClockPainter {
         if (text.isEmpty()) return false
         val left = (Reflect.findField(cls, "mPaddingLeft")?.getInt(view) ?: 0).toFloat()
         drawGlyphRun(canvas, paint, text, left, baseline0, capH, seed)
-        logOnce("AOD", null)
         return true
     }
 
@@ -396,18 +391,6 @@ object EngineClockPainter {
             }
             x += w
         }
-    }
-
-    // ---------------------------------------------------------------------- 诊断
-
-    private val logged = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-
-    private fun logOnce(tag: String, digits: Array<*>?) {
-        if (!GLog.isDebug || !logged.add(tag)) return
-        val dims = digits?.take(10)?.joinToString(",") { d ->
-            if (d == null) "?" else "${dimenOf(d, "getWidth")}x${dimenOf(d, "getHeight")}"
-        }
-        GLog.d("[引擎星月] $tag 已接管绘制${if (dims != null) "，数字位图尺寸 $dims" else ""}")
     }
 
     /** 供 HostClockHider 判断：这个类名走哪条绘制逻辑。 */
