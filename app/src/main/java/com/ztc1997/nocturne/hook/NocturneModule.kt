@@ -52,10 +52,9 @@ class NocturneModule : XposedModule() {
     }
 
     override fun onPackageReady(param: PackageReadyParam) {
-        if (param.packageName !in SCOPE_PACKAGES) {
-            GLog.d("跳过包 ${param.packageName}")
-            return
-        }
+        // 作用域由 LSPosed 依 scope.list / 用户勾选过滤，框架不会回调作用域外的包。
+        // 这里不再重复维护一份代码白名单：两处列表易不同步，且会挡住用户在框架里
+        // 新勾选的包（诊断期遗留的 SCOPE_PACKAGES 已移除）。
         install(param.classLoader)
     }
 
@@ -200,15 +199,4 @@ class NocturneModule : XposedModule() {
     private fun currentAppClassLoader(): ClassLoader? = runCatching {
         DndState.currentAppContext()?.classLoader
     }.getOrNull()
-
-    companion object {
-        /** 作用域：只有这些包里的时钟才替换。初期瞄准 ColorOS 17 的 SystemUI 与各家启动器。 */
-        val SCOPE_PACKAGES = setOf(
-            "com.android.systemui",
-            "com.oppo.launcher",
-            "com.coloros.launcher",
-            "com.oneplus.launcher",
-            "com.android.launcher",
-        )
-    }
 }
