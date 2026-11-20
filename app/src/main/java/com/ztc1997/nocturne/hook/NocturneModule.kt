@@ -69,7 +69,6 @@ class NocturneModule : XposedModule() {
         // 不重新注入日志出口就只剩 android.util.Log 兜底，LSPosed 日志里什么都看不到
         // （2026-11-19 实测踩到，误以为热重载失败）。
         installLogSink()
-        GLog.level = 3
         GLog.i("热重载完成，重装钩子（旧句柄 ${param.oldHookHandles.size} 个）")
         hookBag?.unhookAll()
         param.oldHookHandles.forEach { runCatching { it.unhook() } }
@@ -118,16 +117,15 @@ class NocturneModule : XposedModule() {
 
         val feature = ClockMaskFeature(xposed, classLoader, { configSource.snapshot }, bag, triggerPlugin)
 
-        // 配置一变就更新日志等级；时钟判定每次回调都读最新快照，无需重装钩子。
-        // 诊断期：hook 进程强制 debug 级（按调用日志是定位锁屏/AOD 问题的关键
-        // 证据），问题解决后恢复为跟随配置。
+        // 配置一变就更新日志等级与时钟判定；时钟判定每次回调都读最新快照，无需重装钩子。
         // 顺带：跟随系统被打开始、或设置页发来刷新请求时，立刻查一次系统作息。
         configSource.onChanged = { fresh ->
-            GLog.level = 3
+            GLog.level = fresh.logLevel
             SystemSleepSource.onConfigChanged(fresh)
         }
         configSource.open()
-        GLog.level = 3
+        // 首帧配置读完后同步一次日志等级（设置页的日志开关才真正生效）。
+        GLog.level = configSource.snapshot.logLevel
         // 进程刚起来时先把系统作息抄一份到 Settings.Secure，
         // 设置页打开就有值可展示，不用等第一次时钟刷新。
         SystemSleepSource.onConfigChanged(configSource.snapshot)
