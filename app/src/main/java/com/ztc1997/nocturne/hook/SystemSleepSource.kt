@@ -5,6 +5,7 @@ import android.provider.Settings
 import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.GLog
 import com.ztc1997.nocturne.core.SystemSleepTime
+import java.util.concurrent.Executors
 
 /**
  * 系统自动学习的入睡/起床时间（ColorOS 场景服务）。
@@ -67,6 +68,17 @@ object SystemSleepSource {
     private var failureLogged = false
 
     /**
+     * Settings.Secure 是 binder 同步写，不能在时钟刷新回调线程上做（分钟级、
+     * 逐位数字写入时尤其频繁），否则会把回调卡在跨进程写盘上。所有落盘统一
+     * 丢到这一条单线程队列：既串行（report 与 ack 保序），又不阻塞调用方。
+     */
+    private val writer by lazy {
+        Executors.newSingleThreadExecutor { r ->
+            Thread(r, "nocturne-sleep-write").apply { isDaemon = true }
+        }
+    }
+
+    /**
      * 取系统作息窗口。
      *
      * @param enabled 配置里的「跟随系统」开关；关闭时直接返回 null（不查询）
@@ -101,12 +113,12 @@ object SystemSleepSource {
      * 配置回调在框架的 binder 线程上跑，provider 查询可能阻塞，所以丢到独立线程，
      * 查完由 [report] 落 Settings.Secure，设置页就能立刻读到（[SystemSleepTime.ACK_KEY] 回执）。
      */
-    fun onConfigChanged(cfg: ConfigSnapshot) {
+    fun onConfigChanged(cfg: ConfigSnapshot) = synchronized(this) {
         val token = cfg.sleepRequest
         val needFetch = cfg.followSystem && (!following || token != lastToken)
         following = cfg.followSystem
         lastToken = token
-        if (!needFetch) return
+        if (!needFetch) return@synchronized
         Thread({
             runCatching { fetchNow(token) }
         }, "nocturne-sleep-fetch").apply { isDaemon = true }.start()
@@ -131,10 +143,14 @@ object SystemSleepSource {
     /** 告诉设置页「第 [token] 次刷新请求已办完」；token 为 0 表示不是被请求触发的。 */
     private fun ack(token: Int) {
         if (token == 0) return
-        runCatching {
-            val ctx = DndState.currentAppContext() ?: return
-            Settings.Secure.putInt(ctx.contentResolver, SystemSleepTime.ACK_KEY, token)
-        }.onFailure { GLog.w("回写系统作息回执失败", it) }
+        // 与 report 共用单线程队列，保证「先落 SECURE_KEY，再写 ACK」的顺序：
+        // 设置页轮询到 ACK 时读到的必定是本次的新值，而非上一次的旧值。
+        writer.execute {
+            runCatching {
+                val ctx = DndState.currentAppContext() ?: return@execute
+                Settings.Secure.putInt(ctx.contentResolver, SystemSleepTime.ACK_KEY, token)
+            }.onFailure { GLog.w("回写系统作息回执失败", it) }
+        }
     }
 
     private fun query(): Pair<String, String>? = try {
@@ -184,14 +200,19 @@ object SystemSleepSource {
      *
      * 每次都写、不按内容去重：这份镜像可能被外部清掉（清数据、系统重置、用户手动删），
      * 只在内容变化时写会留下"hook 认为写过、界面上却是空"的空洞。
+     *
+     * 写盘投递到 [writer] 后台线程：本方法由时钟刷新回调（[window]）与配置回调
+     * （[fetchNow]）调用，binder 同步写不能占着回调线程。
      */
     private fun report(window: Pair<String, String>) {
         val payload = SystemSleepTime.encode(window.first, window.second)
-        runCatching {
-            val ctx = DndState.currentAppContext() ?: return
-            Settings.Secure.putString(ctx.contentResolver, SystemSleepTime.SECURE_KEY, payload)
-            if (payload != reported) GLog.i("系统作息 = ${window.first} → ${window.second}")
-            reported = payload
-        }.onFailure { GLog.w("回写系统作息到 Settings.Secure 失败", it) }
+        writer.execute {
+            runCatching {
+                val ctx = DndState.currentAppContext() ?: return@execute
+                Settings.Secure.putString(ctx.contentResolver, SystemSleepTime.SECURE_KEY, payload)
+                if (payload != reported) GLog.i("系统作息 = ${window.first} → ${window.second}")
+                reported = payload
+            }.onFailure { GLog.w("回写系统作息到 Settings.Secure 失败", it) }
+        }
     }
 }
