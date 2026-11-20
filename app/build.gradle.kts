@@ -42,8 +42,8 @@ android {
         applicationId = "com.ztc1997.nocturne"
         minSdk = 37
         targetSdk = 37
-        versionCode = 22
-        versionName = "0.1.9"
+        versionCode = 23
+        versionName = "0.2.0"
     }
 
     signingConfigs {
