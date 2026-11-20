@@ -4,10 +4,9 @@ import android.content.Context
 import android.view.View
 import android.widget.TextView
 import com.ztc1997.nocturne.core.ConfigSnapshot
+import com.ztc1997.nocturne.core.FakeTime
 import com.ztc1997.nocturne.core.GLog
-import com.ztc1997.nocturne.core.Placeholder
 import io.github.libxposed.api.XposedInterface
-import java.util.Calendar
 
 /**
  * KeyguardPersonalityClocks 插件时钟拦截（真机反编译见 HOOK_PLAN.md §2.6）。
@@ -22,8 +21,8 @@ import java.util.Calendar
  * 插件类通过 createPackageContext 加载进宿主进程（launcher / systemui），
  * 所以要用插件的 classLoader 找类，而不是宿主的。
  *
- * 拦截条件刻意收窄：写入内容是 1~2 位纯数字（时间数字位）才替换为星月占位
- * （core/Placeholder.kt，按分钟确定性变化）。
+ * 拦截条件刻意收窄：写入内容是 1~2 位纯数字（时间数字位）才替换为假数字
+ * （core/FakeTime.kt，按分钟确定性变化，且恒落在 6~9 —— 真实钟点不可能出现）。
  * 冒号（":"）、AM/PM、日期（"11月17日"）、天气（"30°"）都不是纯数字，自动放行。
  * 未命中睡眠时段时不做任何替换，原样 proceed。
  *
@@ -81,17 +80,15 @@ class PersonalityClocksFeature(
                         } else {
                             val arg = runCatching { chain.getArg(0) as? CharSequence }.getOrNull()
                             if (isTimeDigitArg(arg)) {
-                                // 写入内容本身就是一个数字段：逐位换成星月（确定性按分钟变化），
+                                // 写入内容本身就是一个数字段：换成假数字（确定性按分钟变化），
                                 // 同分钟内结果恒定，去重与 RedOne 刷新等副作用照常保留。
-                                val masked = Placeholder.mask(
+                                // 假数字与真实数字同为 1~2 位，字体度量不变，不需要 span。
+                                val masked = FakeTime.mask(
                                     arg,
-                                    Placeholder.minuteSeed(System.currentTimeMillis()),
+                                    FakeTime.minuteSeed(System.currentTimeMillis()),
                                 )
                                 if (GLog.isDebug) GLog.d("屏蔽时间数字：$arg → \"$masked\"（$source）")
-                                // 带 StarMoonSpan：星月自绘、逐位继承原数字 advance（见 StarMoonSpan）
-                                chain.proceed(
-                                    arrayOf<Any?>(StarMoonSpan.spanned(masked, arg)),
-                                )
+                                chain.proceed(arrayOf<Any?>(masked))
                             } else {
                                 // 非纯数字放行（冒号/AM/PM/日期/天气）；debug 下记录
                                 // 数字类以外的写入，用于排查唤醒瞬间是否走了别的入口。
@@ -164,18 +161,19 @@ class PersonalityClocksFeature(
                                 if (tv == null || digits.isNullOrEmpty()) {
                                     chain.proceed()
                                 } else {
-                                    val masked = Placeholder.mask(
+                                    val masked = FakeTime.mask(
                                         digits,
-                                        Placeholder.minuteSeed(System.currentTimeMillis()),
+                                        FakeTime.minuteSeed(System.currentTimeMillis()),
                                     )
                                     if (GLog.isDebug) {
                                         GLog.d("屏蔽主题图片数字：$digits → \"$masked\"（$source）")
                                     }
-                                    // 原方法会把文本清空并贴图，这里改成反向操作：
-                                    // 清图 + 写入星月文本（StarMoonSpan 逐位继承原数字宽度）。
-                                    tv.setCompoundDrawables(null, null, null, null)
-                                    tv.text = StarMoonSpan.spanned(masked, digits)
-                                    null
+                                    // 换参数而不是自绘：原方法会按 digits 取 0-9 主题位图
+                                    // 逐位贴成 compound drawable，喂假数字就能画出主题
+                                    // 自己的字形，观感与主题完全一致。
+                                    val args = chain.args.toMutableList()
+                                    args[1] = masked
+                                    chain.proceed(args.toTypedArray())
                                 }
                             }
                         },
@@ -186,43 +184,6 @@ class PersonalityClocksFeature(
         }
         return count
     }
-    /** 已经打印过「数字位仍是主题位图」告警的视图。 */
-    private val warnedDigitViews =
-        java.util.Collections.synchronizedSet(mutableSetOf<Int>())
-
-    /**
-     * 全局主题下贴图片数字的写入源头（`ClockTimeView#applyDigitDrawable`）。
-     *
-     * 2026-11-19 换机修正：上一版命中睡眠时把数字位 alpha 置 0，桌面时钟于是
-     * **整块消失**（真机截图确认为空白），与状态栏/锁屏的星月完全不一致。现在
-     * 数字位图已在取图源头（[hookClockNum]）换成 [StarMoonDrawable]，这里只做
-     * 兜底与诊断：睡眠中若数字位上贴的仍不是星月（说明这条链路没走
-     * getHostClockNum，例如别的主题走 ThemeClockHelper 缓存），就地再包一层，
-     * 并打告警便于定位漏掉的取图入口。解除睡眠时什么都不做：宿主每次刷新都会
-     * 重新 apply 原始位图，自然恢复。
-     */
-    private fun applyStarToDigitView(digitView: View?, source: String) {
-        if (digitView == null || !shouldMask()) return
-        val tv = runCatching {
-            digitView.javaClass.getMethod("getVisibleTextView").invoke(digitView) as? TextView
-        }.getOrNull() ?: return
-        val digitDrawable = tv.compoundDrawables.getOrNull(0) ?: return
-        // 星月已在取图源头换好；冒号是自己补的。都不该再被包一层。
-        if (digitDrawable is StarMoonDrawable || digitDrawable is ColonDrawable) {
-            if (GLog.isDebug && warnedDigitViews.add(System.identityHashCode(digitView))) {
-                GLog.d("图片数字位已是星月/冒号（$source）")
-            }
-            return
-        }
-        if (warnedDigitViews.add(System.identityHashCode(digitView))) {
-            GLog.w("图片数字位仍是主题位图，就地替换：${digitView.javaClass.name}（$source）")
-        }
-        val star = StarMoonGlyph.isStar(
-            Placeholder.minuteSeed(System.currentTimeMillis()),
-            0,
-        )
-        tv.setCompoundDrawables(StarMoonDrawable(digitDrawable, star), null, null, null)
-    }
 
     /** 已经挂过 getHostClockNum 的 Class。 */
     private val hookedNumClasses =
@@ -232,9 +193,12 @@ class PersonalityClocksFeature(
      * 主题数字位图的取图源头（全局主题的桌面/锁屏样式「图片数字」）。
      *
      * `Utils.getHostClockNum(context, digit)` 每次返回一张 0-9 数字位图，宿主随后
-     * 把它缩放、贴成数字位的 compound drawable。这里换成 [StarMoonDrawable]：
-     * intrinsic 尺寸沿用原位图，宿主算出的字宽/行高不变，只是画出来是星月；
-     * 星/月由「分钟种子 + 数字值」决定，与状态栏/文本链路图案一致。
+     * 把它缩放、贴成数字位的 compound drawable。**直接改第 2 个参数**：把真实数字
+     * 换成假数字，宿主就会去取假数字的主题位图 —— 画出来是主题自己的字形，
+     * 观感与主题原生完全一致，不需要任何自绘（这是本方案相比星月自绘最大的收益）。
+     *
+     * 逐位调用天然对应"每一位"：宿主按 时十/时个/分十/分个 依次取图，
+     * 每一位的假值由 (分钟种子, 原数字) 决定，与整串 mask 的结果一致。
      *
      * 只在睡眠时段替换；平时原样返回，主题位图不受影响。
      */
@@ -249,17 +213,17 @@ class PersonalityClocksFeature(
                     xposed.hook(method)
                         .setId("nocturne:personality:num:$source")
                         .intercept { chain ->
-                            val result = chain.proceed()
-                            if (!shouldMask()) return@intercept result
-                            val digit = chain.getArg(1) as? Int ?: return@intercept result
-                            val origin = result as? android.graphics.drawable.Drawable
-                                ?: return@intercept result
-                            if (origin is StarMoonDrawable) return@intercept origin
-                            val star = StarMoonGlyph.isStar(
-                                Placeholder.minuteSeed(System.currentTimeMillis()),
+                            val digit = chain.getArg(1) as? Int
+                            if (!shouldMask() || digit == null || digit !in 0..9) {
+                                return@intercept chain.proceed()
+                            }
+                            val fake = FakeTime.digit(
+                                FakeTime.minuteSeed(System.currentTimeMillis()),
                                 digit,
                             )
-                            StarMoonDrawable(origin, star)
+                            val args = chain.args.toMutableList()
+                            args[1] = fake
+                            chain.proceed(args.toTypedArray())
                         },
                 )
                 GLog.i("挂钩成功：主题数字取图 getHostClockNum（来源 $source → ${cls.name}）")
@@ -319,8 +283,12 @@ class PersonalityClocksFeature(
     }
 
     /**
-     * 全局主题下贴图片数字的写入源头。命中睡眠时把数字位换成星月（见
-     * [applyStarToDigitView]/[hookClockNum]），不再 alpha 隐藏。
+     * 全局主题下贴图片数字的写入源头。
+     *
+     * 2026-11-20：改参数化方案后这里不再需要任何动作 —— 数字位图已在取图源头
+     * （[hookClockNum]）换成假数字对应的主题位图，[applyDigitDrawable] 只是把
+     * 拿到的图贴上去，贴出来自然是假时间。保留钩子只为在 debug 日志里确认这条
+     * 链路还在走（排查"桌面为什么没变"时有用），行为上完全透明。
      */
     private fun hookImageDigit(cls: Class<*>, source: String): Int {
         if (!hookedImageDigitClasses.add(cls)) return 0
@@ -336,131 +304,15 @@ class PersonalityClocksFeature(
                     xposed.hook(method)
                         .setId("nocturne:personality:imgdigit:$source")
                         .intercept { chain ->
-                            val result = chain.proceed()
-                            // 第 0 个参数是 DigitalTimeView（FrameLayout，内含可见/不可见 TextView）。
-                            applyStarToDigitView(
-                                runCatching { chain.getArg(0) as? View }.getOrNull(),
-                                source,
-                            )
-                            result
+                            if (GLog.isDebug && shouldMask()) {
+                                GLog.d("图片数字位贴图（取图源头已换假数字，$source）")
+                            }
+                            chain.proceed()
                         },
                 )
                 GLog.i("挂钩成功：图片数字 applyDigitDrawable（来源 $source → ${cls.name}）")
                 count++
             }.onFailure { GLog.w("挂钩图片数字失败（来源 $source）", it) }
-        }
-        return count
-    }
-
-    /** 已经挂过 text 族 SetContent 的 Class。 */
-    private val hookedTextContentClasses =
-        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
-
-    /** 已经挂过 gallery 族 refreshClockText 的 Class。 */
-    private val hookedGalleryClasses =
-        java.util.Collections.synchronizedSet(mutableSetOf<Class<*>>())
-
-    /**
-     * 把时间 TextView 的内容改写成星月（按数字段，冒号保留）。
-     * 原文用系统当前时间构造 "HH:mm"，供 StarMoonSpan 逐位继承宽度。
-     * 已是星月（同分钟）时跳过，避免无谓重绘。
-     */
-    private fun maskTimeInto(tv: TextView) {
-        val cal = Calendar.getInstance()
-        val orig = String.format(
-            "%02d:%02d",
-            cal.get(Calendar.HOUR_OF_DAY),
-            cal.get(Calendar.MINUTE),
-        )
-        val masked = Placeholder.mask(orig, Placeholder.minuteSeed(System.currentTimeMillis()))
-        if (tv.text?.toString() != masked) tv.text = StarMoonSpan.spanned(masked, orig)
-    }
-
-    /**
-     * text 族（锁屏 + AOD，`com.oplus.keyguard.clock.text.*`）。
-     *
-     * 该类家族不经过 `tryUpdateText`：`KeyguardSetContentHandler.applyTextClockTimeAndExtra`
-     * 直接 `localTime.setText(str)` 写 "HH:mm"，是第三方主题锁屏显示真实时间的直接原因
-     * （真机截图确认：锁屏 20:01 完整真实时间，日志里 digital 族的替换只作用于桌面卡片）。
-     *
-     * 采用 after 覆盖：原方法先写真实时间完成自身状态同步，命中睡眠再改写为星月；
-     * 解除睡眠时不覆盖，真实时间自然保留。
-     */
-    private fun hookTextContent(cls: Class<*>, source: String): Int {
-        if (!hookedTextContentClasses.add(cls)) return 0
-        val methods = Reflect.methodsNamed(cls, "applyTextClockTimeAndExtra")
-        if (methods.isEmpty()) {
-            GLog.w("applyTextClockTimeAndExtra 不存在于 ${cls.name}（来源 $source）")
-            return 0
-        }
-        var count = 0
-        for (method in methods) {
-            runCatching {
-                bag.add(
-                    xposed.hook(method)
-                        .setId("nocturne:personality:textcontent:$source")
-                        .intercept { chain ->
-                            val result = chain.proceed()
-                            if (shouldMask()) {
-                                // arg0 = com.oplus.keyguard.clock.text.ui.view.ClockViewRoot
-                                val root = runCatching { chain.getArg(0) }.getOrNull()
-                                val tv = runCatching {
-                                    root?.javaClass?.getMethod("getLocalTime")?.invoke(root) as? TextView
-                                }.getOrNull()
-                                if (tv != null) {
-                                    runCatching { maskTimeInto(tv) }
-                                        .onFailure { GLog.w("改写 text 族时间失败（$source）", it) }
-                                    if (GLog.isDebug) GLog.d("屏蔽 text 族时间（$source）")
-                                }
-                            }
-                            result
-                        },
-                )
-                GLog.i("挂钩成功：text 族时间（来源 $source → ${cls.name}）")
-                count++
-            }.onFailure { GLog.w("挂钩 text 族失败（来源 $source）", it) }
-        }
-        return count
-    }
-
-    /**
-     * gallery 族（灵感画廊时钟，`com.oplus.keyguard.clock.gallery.*`）。
-     *
-     * `BaseSingleClockView.refreshClockText` 同样直接 `timeTextView.setText(...)`，
-     * 绕过 tryUpdateText。after 阶段取 `getTimeTextView()` 改写成星月。
-     */
-    private fun hookGalleryClock(cls: Class<*>, source: String): Int {
-        if (!hookedGalleryClasses.add(cls)) return 0
-        val methods = Reflect.methodsNamed(cls, "refreshClockText")
-        if (methods.isEmpty()) {
-            GLog.w("refreshClockText 不存在于 ${cls.name}（来源 $source）")
-            return 0
-        }
-        var count = 0
-        for (method in methods) {
-            runCatching {
-                bag.add(
-                    xposed.hook(method)
-                        .setId("nocturne:personality:gallery:$source")
-                        .intercept { chain ->
-                            val result = chain.proceed()
-                            if (shouldMask()) {
-                                val self = chain.thisObject
-                                val tv = runCatching {
-                                    self?.javaClass?.getMethod("getTimeTextView")?.invoke(self) as? TextView
-                                }.getOrNull()
-                                if (tv != null) {
-                                    runCatching { maskTimeInto(tv) }
-                                        .onFailure { GLog.w("改写 gallery 时间失败（$source）", it) }
-                                    if (GLog.isDebug) GLog.d("屏蔽 gallery 族时间（$source）")
-                                }
-                            }
-                            result
-                        },
-                )
-                GLog.i("挂钩成功：gallery 族时间（来源 $source → ${cls.name}）")
-                count++
-            }.onFailure { GLog.w("挂钩 gallery 族失败（来源 $source）", it) }
         }
         return count
     }
@@ -475,6 +327,11 @@ class PersonalityClocksFeature(
         val ctx = appContext ?: run {
             GLog.w("宿主 Context 未就绪，插件时钟拦截延迟到下次触发")
             return 0
+        }
+        // 临时诊断（收口删除）：字号/RT 通道/文本拷贝追踪，仅 debug 构建。
+        if (com.ztc1997.nocturne.BuildConfig.DEBUG) {
+            runCatching { TextSizeDiag(xposed, bag).install(ctx) }
+                .onFailure { GLog.w("字号诊断安装失败", it) }
         }
         var hooked = 0
         for (pkg in PLUGIN_PACKAGES) {
@@ -521,24 +378,11 @@ class PersonalityClocksFeature(
                 val symCls = runCatching { loader.loadClass(className) }.getOrNull() ?: continue
                 hooked += hookClockSymbol(symCls, "fast-path:$pkg")
             }
-            // ③ text 族（第三方主题锁屏 / AOD）：直接 setText，绕过 tryUpdateText。
-            for (className in TEXT_CONTENT_CLASS_NAMES) {
-                val cls = runCatching { loader.loadClass(className) }.getOrNull()
-                if (cls == null) {
-                    if (GLog.isDebug) GLog.d("text 族类不存在：$pkg → $className")
-                    continue
-                }
-                hooked += hookTextContent(cls, "fast-path:$pkg")
-            }
-            // ④ gallery 族（灵感画廊时钟）：同样直接 setText。
-            for (className in GALLERY_CLOCK_CLASS_NAMES) {
-                val cls = runCatching { loader.loadClass(className) }.getOrNull()
-                if (cls == null) {
-                    if (GLog.isDebug) GLog.d("gallery 族类不存在：$pkg → $className")
-                    continue
-                }
-                hooked += hookGalleryClock(cls, "fast-path:$pkg")
-            }
+            // ③ text 族 / gallery 族的「刷新后再改写」路线已删除：它们按类名逐个
+            // 补钩，一旦主题换了子类覆写就漏（真机踩到：DefaultSingleClockView
+            // 覆写 refreshClockText，基类出口改的是离屏控件 time_text，屏幕上
+            // 真正显示的 time_text_ext 被子类后写覆盖）。改由
+            // KeyguardTextWriteMask 在 TextView#setText 这一最终写入点统一兜底。
             // ⑤ 第三方/全局主题图片数字（锁屏 + AOD）：ThemeClockHelper.setTextImg。
             for (className in THEME_IMG_CLASS_NAMES) {
                 val cls = runCatching { loader.loadClass(className) }.getOrNull()
@@ -590,23 +434,6 @@ class PersonalityClocksFeature(
          */
         val NUM_CLASS_NAMES = arrayOf(
             "com.oplus.keyguard.clock.digital.util.Utils",
-        )
-
-        /**
-         * text 族时钟内容设置入口（锁屏 + AOD）。真机反编译确认
-         * `applyTextClockTimeAndExtra` 里直接 `localTime.setText(str)`，
-         * 不经过 tryUpdateText —— 第三方主题锁屏显示真实时间的直接原因。
-         */
-        val TEXT_CONTENT_CLASS_NAMES = arrayOf(
-            "com.oplus.keyguard.clock.text.ui.pipeline.handler.KeyguardSetContentHandler",
-        )
-
-        /**
-         * gallery 族（灵感画廊）时钟。`BaseSingleClockView.refreshClockText`
-         * 同样直接 `timeTextView.setText(...)`。
-         */
-        val GALLERY_CLOCK_CLASS_NAMES = arrayOf(
-            "com.oplus.keyguard.clock.gallery.view.BaseSingleClockView",
         )
 
         /**

@@ -60,7 +60,7 @@ object EngineClockPainter {
     private val timeDigitPattern = Regex("""(?i).*time[^/]*/(?:.*?_)?(\d)\.(?:png|webp|jpg)$""")
 
     /** 从图片元素名里取时间数字：命中返回 0..9，否则 null（日期/装饰一律放行）。 */
-    private fun timeDigitOf(src: String?): Int? {
+    internal fun timeDigitOf(src: String?): Int? {
         if (src.isNullOrEmpty()) return null
         if (src.contains("date", ignoreCase = true)) return null
         val m = timeDigitPattern.matchEntire(src) ?: return null

@@ -31,8 +31,19 @@ import kotlin.math.max
  * 适用范围（2026-11-17 修订）：仅插件时钟（PersonalityClocksFeature）与锁屏
  * SET_TEXT 路径（ClockMaskFeature#writeMask）。状态栏/下拉菜单（getSmallTime
  * RETURN_VALUE）已改为纯字符占位，不再挂本 span。
+ *
+ * 2026-11-20 防回归记录：曾尝试两种"动画收尾跳变"修法，均已回退——
+ *  1) 写入时快照 cap/cellW：AOD 写入时字体未加载完，且锁屏 span 会残留到 AOD
+ *     复用 view，快照把 1034 画进 468 格子 → AOD 星月巨大被裁；
+ *  2) openRtTextPaint(false) 取"目标字号"覆盖 paint 度量：锁屏各位是独立
+ *     TextView、paint 状态不同，单一全局目标字号被各位竞争覆盖 → 每位星月
+ *     大小不一致。
+ * 结论：span 始终实时读当前 paint 度量，星月与真实数字同高同宽，任何场景
+ * 大小都正确；跳变必须在绘制/动画链路解决，不要在 span 度量里补偿。
  */
-class StarMoonSpan(private val digit: Char = '0') : ReplacementSpan() {
+class StarMoonSpan(
+    private val digit: Char = '0',
+) : ReplacementSpan() {
 
     override fun getSize(
         paint: Paint,
@@ -68,11 +79,13 @@ class StarMoonSpan(private val digit: Char = '0') : ReplacementSpan() {
         val w = cellWidth(paint)
         val capH = StarMoonGlyph.capHeight(paint)
         if (capH <= 0f) return
+        diagDraw(paint, capH) // 临时诊断，收口删除
+        val center = StarMoonGlyph.capCenterOffset(paint)
         StarMoonGlyph.draw(
             canvas = canvas,
             paint = paint,
             cx = x + w / 2f,
-            cy = baseline + StarMoonGlyph.capCenterOffset(paint),
+            cy = baseline + center,
             capH = capH,
             cellW = w,
             star = star,
@@ -89,6 +102,22 @@ class StarMoonSpan(private val digit: Char = '0') : ReplacementSpan() {
     }
 
     companion object {
+        /** 临时诊断（收口删除）：span 实际绘制时的 paint 字号变化（按 paint 去重）。 */
+        private val lastSeenPaintTs =
+            java.util.Collections.synchronizedMap(mutableMapOf<Int, Float>())
+
+        private fun diagDraw(paint: Paint, capH: Float) {
+            val key = System.identityHashCode(paint)
+            val ts = paint.textSize
+            val prev = lastSeenPaintTs[key]
+            if (prev == null || kotlin.math.abs(prev - ts) > 0.5f) {
+                lastSeenPaintTs[key] = ts
+                com.ztc1997.nocturne.core.GLog.i(
+                    "DRAW p=${Integer.toHexString(key)} ts=${ts.toInt()} cap=${capH.toInt()}",
+                )
+            }
+        }
+
         /**
          * 把 [Placeholder.mask] 产出的星月串包成 SpannableString，逐字符挂
          * [StarMoonSpan]。[original] 是被替换的原始文本（与 masked 等长，
@@ -104,8 +133,9 @@ class StarMoonSpan(private val digit: Char = '0') : ReplacementSpan() {
             for (i in masked.indices) {
                 if (masked[i] == Placeholder.MOON || masked[i] == Placeholder.STAR) {
                     val d = original.getOrNull(i)
+                    val digit = if (d != null && d in '0'..'9') d else '0'
                     ss.setSpan(
-                        StarMoonSpan(if (d != null && d in '0'..'9') d else '0'),
+                        StarMoonSpan(digit),
                         i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
                     )
                 }

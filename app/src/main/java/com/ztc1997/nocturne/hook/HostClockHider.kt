@@ -160,73 +160,16 @@ class HostClockHider(
     }
 
     /**
-     * UIEngine / EGView 锁屏与 AOD 时钟的绘制接管。
+     * 引擎时钟的假数字注入。
      *
-     * 这两处的数字不是文本：
-     *  - 锁屏 `com.zplus.engine.lk_view.TimeView#draw`：0-9 位图数组逐位
-     *    `canvas.drawBitmap`；
-     *  - AOD `com.oplus.egview.widget.TimeView#onDraw`：`mTextLines` 两行
-     *    `canvas.drawText`。
-     *
-     * 而且这套引擎**不通过 ViewGroup.dispatchDraw 出图**，是自己遍历子元素直接
-     * `view.draw(canvas)`，所以 `visibility=INVISIBLE` 和 `alpha=0` 全部无效
-     * （真机实测：两个都设了，画面照旧）。唯一入口就是绘制方法本身：睡眠时
-     * 不 proceed，改由 [EngineClockPainter] 在原数字的格子上画星月——与桌面/
-     * 状态栏是同一份字形实现，观感一致。
+     * 2026-11-20：不再做绘制接管。引擎在画之前会先问"现在几点"
+     * （`TimeView#getHourText/getMinuteText`、AOD 的 `calcTimeNumber`、
+     * 逐位 PNG 模板的图片名字段），把答案换成假数字即可 —— 宿主会用**主题自己的**
+     * 字形、位图宽高和颜色重新排版，观感与主题原生完全一致，也不需要测墨迹包围盒
+     * 或复刻基线。详见 [EngineClockInjector]。
      */
     private fun hookEngineClocks(engineLoader: ClassLoader): Int {
-        var n = 0
-        for (name in ENGINE_CLOCK_CLASSES) {
-            val cls = Reflect.loadClass(name, engineLoader)
-            if (cls == null) {
-                GLog.w("引擎时钟类不存在：$name（loader=${engineLoader.javaClass.name}）")
-                continue
-            }
-            val kind = EngineClockPainter.kindFor(name)
-            var perClass = 0
-            for (methodName in arrayOf("draw", "onDraw")) {
-                for (m in Reflect.methodsNamed(cls, methodName)) {
-                    if (m.parameterTypes.size != 1) continue
-                    if (m.parameterTypes[0] != android.graphics.Canvas::class.java) continue
-                    perClass += runCatching {
-                        bag.add(
-                            xposed.hook(m)
-                                .setId("nocturne:engineclock:${cls.simpleName}:$methodName")
-                                .intercept { chain ->
-                                    if (!shouldMask()) return@intercept chain.proceed()
-                                    val self = chain.thisObject as? View
-                                    val canvas = chain.args.getOrNull(0) as? android.graphics.Canvas
-                                    if (kind != null && self != null && canvas != null) {
-                                        val painted = EngineClockPainter.draw(kind, canvas, self)
-                                        if (painted) return@intercept null
-                                        // 这两类是「通用容器」，绝大多数实例不是时间：
-                                        // 取不到数字就放行原绘制，否则整屏主题元素都会被抹掉。
-                                        if (kind == EngineClockPainter.Kind.ZPLUS_IMAGE_NUMBER ||
-                                            kind == EngineClockPainter.Kind.ZPLUS_IMAGE_ELEMENT
-                                        ) {
-                                            return@intercept chain.proceed()
-                                        }
-                                        // 专用时间类画不出来 = 这块时钟会整块空白。必须留痕，
-                                        // 否则只能靠肉眼发现（2026-11-19 官方主题空白就是这么来的）。
-                                        if (failLogged.add(cls.name)) {
-                                            GLog.w(
-                                                "引擎时钟 ${cls.simpleName} 取不到数字，本块将空白" +
-                                                    "（size=${self.width}x${self.height}）",
-                                            )
-                                        }
-                                    }
-                                    null
-                                },
-                        )
-                        GLog.i("挂钩成功：引擎时钟 ${cls.simpleName}#$methodName（星月接管）")
-                        1
-                    }.getOrElse { GLog.w("挂引擎时钟失败：${cls.name}#$methodName", it); 0 }
-                }
-            }
-            if (perClass == 0) GLog.w("引擎时钟 ${cls.simpleName} 无可挂的绘制方法")
-            n += perClass
-        }
-        return n
+        return EngineClockInjector(xposed, config, bag).install(engineLoader)
     }
 
     private var engineHooked = false

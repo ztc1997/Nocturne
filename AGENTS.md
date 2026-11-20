@@ -124,8 +124,33 @@ ColorOS 17 时钟渲染分两套，都要拦：
      `StarMoonGlyph.inkFraction` 先量出原图墨迹包围盒，再按 `BITMAP_SHRINK` 收
      一点余量，月牙宽度用 `MOON_WIDTH_BITMAP`（文本链路仍用 `MOON_WIDTH_TEXT`）。
 
+5. **假时间占位 `77:77`**（2026-11-20 定稿，取代星月自绘；方案推导见
+   `FAKE_CLOCK_PLAN.md`）：不再自绘，而是把「现在几点」这个**答案**换掉，让宿主
+   用**主题自己的字形/位图/颜色**重新排版。四条链路各有一个源头：
+   - SystemUI 状态栏：`Clock#getSmallTime` 返回值
+   - personality 插件文本：`TextView#setText` 最终写入点（`KeyguardTextWriteMask`）
+   - ColorfulEngine 壁纸时钟（景深时钟）：`ClockFrameRender#K(Context,long)`
+     （`ColorfulClockFrameMask`，需作用域勾选 `com.heytap.colorfulengine`）
+   - VariUIEngine 模板时钟：`EngineClockInjector` —— `TimeView#getHourText/
+     getMinuteText`、AOD `calcTimeNumber`（改 `mTextLines`）、逐位 PNG
+     `ImageElementView#draw`（换图片名），**外加引擎时间变量层**
+6. **引擎时间变量层（`variUIEngineProguard.c7.j#k(String)`）不能省**
+   （2026-11-20 用户报「锁屏有一位时间没被替换」）：`TimeView.draw()` 里分钟的
+   **十位**并不走 `getMinuteText()`，而是直接 `mEngineUtil.c.k("minute")` 取原始
+   变量（反编译 `TimeView.java` 第 172 行），只有个位用 `getMinuteText()`。
+   只挂 getter 时屏上是「假时 : 真十位 + 假个位」，真实个位恰好等于假数字的那
+   一分钟（如假数字 8、真实 18:58）整串看起来就像没替换。
+   变量层拦 `minute` / `hour` / `hour12` / `hour24` / `system.time.min1|min2` /
+   `system.time.hour1|hour2` / `*_resident` 共 11 个名字：`TimeView#b()` 量宽与
+   `draw()` 取值就读到同一个假值，宽度与观感天然一致。类名是混淆的，换版对不上
+   时还有一条兜底：从活的 `TimeView` 反查 `mEngineUtil.c` 再挂（只尝试一次）。
+
 ### 血泪教训（勿重蹈）
 
+- **别只信宿主的「取时间方法」**：`TimeView` 有 `getHourText()`/`getMinuteText()`，
+  但 `draw()` 里分钟十位是另走 `k("minute")` 的（2026-11-20「有一位没被替换」）。
+  换成假数字这类改造，要顺着**每一个取值点**看反编译，不能只看同名 getter；
+  变量层（`VariableManager`）比各个 getter 更靠源头，量宽与绘制共用同一份值。
 - **首选热重载，不要习惯性杀进程**：`module.prop` 里 `autoHotReload=true`，
   模块已实现 `onHotReloading()→true` / `onHotReloaded()`（卸载旧句柄 + 重装）。
   但**只有 `versionCode` 变化**时框架才会触发（同版本 `install -r` 静默无操作），

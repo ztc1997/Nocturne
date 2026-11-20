@@ -105,6 +105,11 @@ object StarMoonGlyph {
     /**
      * 取「数字墨迹高」：该 paint 下 "0" 的 ink 高，也就是真实数字的高度。
      * 文本链路（span）与 AOD 的 drawText 链路都用它，保证与真实数字等高。
+     *
+     * 注意（2026-11-20）：不要对这里的 ink 高做「与 textSize 比值」的归一化。
+     * 「灵感接续」主题的数字是特殊字体，textSize=339 时 getTextBounds("0")=1034
+     * 是**真实数字墨迹高**（真机截图里数字就撑满这么高）。归一化会把星月改小，
+     * 而冒号是主题自己渲染的、大小不变，导致星月与冒号比例失调。
      */
     fun capHeight(paint: Paint): Float {
         paint.getTextBounds("0", 0, 1, digitBounds)

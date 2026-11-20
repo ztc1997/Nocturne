@@ -158,3 +158,39 @@ Launcher 侧证据链（已反编译验证）：
 - `param.processName` 在 ColorOS 17 上的确切值（用于日志与排错）。
 - 桌面五种时钟卡片中，"天气/世界/本地/城市"四种由外部 AppWidget Provider APK 渲染（见 §2.4.1），需拿到 `com.coloros.alarmclock` / `com.coloros.widget` / `com.coloros.weather2` 后静态分析其 `AppWidgetProvider` 与 RemoteViews 时间文本（常见为 `TextView.setText` 或 `setTextViewText(R.id.clock, ...)`）。这几种是 RemoteViews 跨进程更新，hook 点将在这些 Provider 的 `onUpdate` / 时间广播接收器里，而非 Launcher。
 - 是否存在独立的 AOD 进程：静态证据显示 AOD 渲染在 SystemUI 内，但真机仍建议 `adb shell pidof com.android.systemui` 与灭屏后 `dumpsys activity processes` 复核。
+
+## 6. 2026-11-20 换第三方主题（ColorfulEngine 引擎壁纸）后的修正
+
+三条"写入源头"钩子在新主题上全部落空，真机取证后追加了两条链路。**结论：不要再按
+类名逐个找写入源，主题换版就会多出子类覆写，永远追不上。**
+
+### 6.1 最终写入点兜底（systemui / launcher）
+
+`KeyguardTextWriteMask`：挂 `android.widget.TextView.setText(CharSequence[,BufferType])`，
+按实例类名前缀 `com.oplus.keyguard.*` 过滤，只改 `^\d{1,2}:\d{2}$` 与（资源 id 名含
+time/clock 的）1~2 位纯数字。取代了 `hookTextContent`（text 族）与 `hookGalleryClock`
+（gallery 族）。
+
+失败原因存档：`DefaultSingleClockView` **覆写**了 `refreshClockText`；基类实现只写离屏
+控件 `time_text`，子类紧接着写屏幕上的 `time_text_ext`。日志能看到
+`18:34 → 66:66`，但改的不是屏幕上那个。
+
+### 6.2 壁纸引擎时钟（com.heytap.colorfulengine，独立进程）
+
+这类主题锁屏/AOD 上那串占满屏幕的巨大数字**不在 View 树里**（uiautomator 数字区域
+完全空白，`KeyguardEngineContainer` 子节点恒 0），是壁纸进程用 GL 把数字画进壁纸纹理
+（景深效果，数字内部透出另一层壁纸）。
+
+- 反编译产物：`reverse/out-colorfulengine/`（只保留 `wallpaper/clockframe` 包）
+- 钩点：`ClockFrameRender#K(Context, long)`（全 APK 唯一的时间格式化点，格式 `"HHmm"`）
+- 调用链：`a(boolean,long)` = updateClockTime → `K()` → `I(串)` 算变了几个数字 →
+  `H(I,串)` 里 `x0([各位数字])` 上传 digit uniform + 返回动画名 →
+  `i0/h0/X` 上传并播放翻转动画
+- 做法：让 `K` 返回 `FakeTime.mask("HHmm")`（四位全同 6~9）。四个数字位取同一张假数字
+  纹理（主题自己的字形+景深），与上一分钟必不同 → 走 `fourNumberChange` 整串翻转，
+  每分钟必变。**不碰 `x0`／纹理名／GL 状态**，没有取不到纹理导致空白的风险。
+- 前置条件：LSPosed 作用域必须勾选 `com.heytap.colorfulengine`（已在 `scope.list`
+  推荐列表里，但已安装模块要用户手动勾选，勾完需重启壁纸进程）。
+
+真机结果（v0.1.9）：锁屏小字 `88:88`、壁纸巨大数字 `9999`；跨分钟 `9999 → 6666`
+两侧同步；AOD 同样一致。

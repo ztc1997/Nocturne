@@ -129,12 +129,33 @@ class NocturneModule : XposedModule() {
         // 设置页打开就有值可展示，不用等第一次时钟刷新。
         SystemSleepSource.onConfigChanged(configSource.snapshot)
 
+        // 诊断：把首帧配置打进日志。排查"为什么没生效"时第一眼要确认的是
+        // manualOverride / enabled 到底是什么值 —— remote preferences 与模块 App
+        // 的本地镜像可能不一致，只看本地文件会误判。
+        GLog.i("首帧配置：${configSource.snapshot}")
+
         feature.install()
+
+        // 时钟文本的最终写入点兜底：按实例包名筛 com.oplus.keyguard.*，
+        // 一次覆盖 digital / text / gallery 全部族与全部子类（含主题换版新增的
+        // 子类覆写）。详见 KeyguardTextWriteMask 的类注释。
+        KeyguardTextWriteMask(xposed, { configSource.snapshot }, bag).install()
+
+        // 壁纸引擎（ColorfulEngine）的景深时钟：锁屏/AOD 上那串占满屏幕的巨大
+        // 数字是壁纸进程用 GL 画的，不在 View 树里，只能在壁纸进程内拦时间来源。
+        // 非壁纸进程里类不存在，install 直接返回 0。
+        ColorfulClockFrameMask(xposed, { configSource.snapshot }, bag).install(classLoader)
+
+        // AOD 电池重叠：屏蔽态下拦截主题把 oplus_keyguardstyle_aod_clock_height
+        // 写成异常小值（会把电池上移压到星月上）。详见 AodClockHeightGuard。
+        AodClockHeightGuard(xposed, { configSource.snapshot }, bag).install(classLoader)
+
         installPluginClocks(xposed, bag, pluginFeature, classLoader, pluginOnce)
 
         // 第三方主题：锁屏 / AOD 时钟由主题控件自绘（无文本可替换），
         // 只能整块跳绘。详见 HostClockHider。
         HostClockHider(xposed, classLoader, { configSource.snapshot }, bag).install()
+
 
         this.configSource = configSource
         this.hookBag = bag

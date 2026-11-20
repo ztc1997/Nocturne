@@ -9,3 +9,8 @@ com.oppo.launcher
 com.coloros.launcher
 com.oneplus.launcher
 com.android.launcher
+
+# 壁纸引擎（ColorfulEngine）。「引擎壁纸 / 景深时钟」类第三方主题的锁屏与息屏
+# 时钟是由壁纸进程自己用 GL 画进壁纸纹理的（真机取证：锁屏上那串巨大数字在
+# View 树里完全不存在）。不勾选这一项，这类主题的锁屏/AOD 时间无法屏蔽。
+com.heytap.colorfulengine

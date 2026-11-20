@@ -4,8 +4,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import com.ztc1997.nocturne.core.ConfigSnapshot
+import com.ztc1997.nocturne.core.FakeTime
 import com.ztc1997.nocturne.core.GLog
-import com.ztc1997.nocturne.core.Placeholder
 import io.github.libxposed.api.XposedInterface
 import java.util.Calendar
 
@@ -82,18 +82,17 @@ class ClockMaskFeature(
                                 if (!shouldMask) {
                                     real
                                 } else {
-                                    // 原返回值整串按数字段替换为星月（冒号等非数字保留）。
-                                    // 纯函数 + 分钟种子，无状态不闪烁；失败兜底单个月亮。
-                                    // 2026-11-17 修订：不再包 StarMoonSpan，直接返回纯
-                                    // 字符占位串 —— 下拉菜单里宿主把文本重建为纯 String
-                                    // 丢掉 span，本就退回字符渲染；状态栏与它同源
-                                    // （getSmallTime），索性同样用字符占位，两处观感一致。
+                                    // 原返回值整串换成假时间（冒号、AM/PM 等非数字保留）。
+                                    // 纯函数 + 分钟种子，无状态不闪烁；失败兜底两位假数字。
+                                    // 2026-11-20：不再包 StarMoonSpan —— 假数字的字宽与
+                                    // 真实数字不同（8 比 1 宽），继承原宽度会把字形挤变形，
+                                    // 直接返回纯文本让宿主自己排版。
                                     runCatching {
-                                        Placeholder.mask(
+                                        FakeTime.mask(
                                             real as? CharSequence,
-                                            Placeholder.minuteSeed(System.currentTimeMillis()),
+                                            FakeTime.minuteSeed(System.currentTimeMillis()),
                                         )
-                                    }.getOrElse { Placeholder.MOON.toString() }
+                                    }.getOrElse { FakeTime.twoDigits(FakeTime.minuteSeed(System.currentTimeMillis())) }
                                 }
                             } else {
                                 val result = chain.proceed()
@@ -173,13 +172,14 @@ class ClockMaskFeature(
     }
 
     /**
-     * 按字段语义写星月占位文本：hour/minute 字段用系统当前时间构造 "%02d" 数字段
-     * 后逐位替换；colon 写 ":"；无法识别的字段写整串 "HH:mm" 的星月版。
+     * 按字段语义写假时间：hour/minute 字段各自是一段数字，用系统当前时分作为
+     * 散列输入构造**长度相同**的假数字段；colon 写原样冒号；无法识别的字段写整串。
+     *
+     * 假的两位数字与原值同为两位，所以 TextView 的换行、居中、基线都不变；
      * 同分钟内结果恒定（确定性散列），跨分钟自动整组变化。
-     * 带 StarMoonSpan：逐位继承原数字 advance，宽度与真实文本一致。
      */
     private fun writeMask(tv: TextView, hint: String) {
-        val seed = Placeholder.minuteSeed(System.currentTimeMillis())
+        val seed = FakeTime.minuteSeed(System.currentTimeMillis())
         val cal = Calendar.getInstance()
         val hour = String.format("%02d", cal.get(Calendar.HOUR_OF_DAY))
         val minute = String.format("%02d", cal.get(Calendar.MINUTE))
@@ -189,8 +189,8 @@ class ClockMaskFeature(
             hint.contains("colon", true) -> ":"
             else -> "$hour:$minute"
         }
-        val masked = Placeholder.mask(orig, seed)
-        if (tv.text?.toString() != masked) tv.text = StarMoonSpan.spanned(masked, orig)
+        val masked = FakeTime.mask(orig, seed)
+        if (tv.text?.toString() != masked) tv.text = masked
     }
 
     private fun hintFromClass(view: TextView): String = view.javaClass.simpleName
