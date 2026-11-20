@@ -110,8 +110,9 @@ object SystemSleepSource {
     /**
      * 配置变化时调用：跟随系统打开、或设置页发来新的刷新请求时，立刻查一次。
      *
-     * 配置回调在框架的 binder 线程上跑，provider 查询可能阻塞，所以丢到独立线程，
-     * 查完由 [report] 落 Settings.Secure，设置页就能立刻读到（[SystemSleepTime.ACK_KEY] 回执）。
+     * 配置回调在框架的 binder 线程上跑，provider 查询可能阻塞，所以丢到 [writer]
+     * 单线程队列，查完由 [report] 落 Settings.Secure，设置页就能立刻读到
+     * （[SystemSleepTime.ACK_KEY] 回执）。
      */
     fun onConfigChanged(cfg: ConfigSnapshot) = synchronized(this) {
         val token = cfg.sleepRequest
@@ -119,9 +120,9 @@ object SystemSleepSource {
         following = cfg.followSystem
         lastToken = token
         if (!needFetch) return@synchronized
-        Thread({
-            runCatching { fetchNow(token) }
-        }, "nocturne-sleep-fetch").apply { isDaemon = true }.start()
+        // 复用 report/ack 的单线程队列：配置变更可能连续推送，逐个排队比每条 new Thread
+        // 更稳，也保证 fetchNow → report → ack 的顺序不被并发打乱。
+        writer.execute { runCatching { fetchNow(token) } }
     }
 
     /** 立即查询一次（忽略软过期），查完写缓存 + Settings.Secure 回执。 */

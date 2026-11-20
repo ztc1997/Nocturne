@@ -50,7 +50,29 @@ object FakeTime {
      * 这里刻意**不看**它 —— 看了反而会让不同位置的数字算出不同结果。
      */
     @Suppress("UNUSED_PARAMETER")
-    fun digit(seed: Long, original: Int): Int = raw(seed)
+    fun digit(seed: Long, original: Int): Int = effectiveDigit(seed)
+
+    /** 只缓存最近一次求出的 seed→假数字；逐位回调的 seed 天然按分钟推进，命中率很高。 */
+    private data class DigitCache(val seed: Long, val digit: Int)
+
+    @Volatile
+    private var cache: DigitCache? = null
+
+    /**
+     * 该分钟真正使用的假数字：raw 值与上一分钟撞车时顺移一位。
+     *
+     * 相邻两分钟必不同这一性质只取决于假数字本身，不必再对整串文本做递归 mask；
+     * 这里对 6..9 这四个整数做有界回溯，避免高频 TextView 回调里反复构造字符串。
+     */
+    private fun effectiveDigit(seed: Long, depth: Int = 0): Int {
+        cache?.let { if (it.seed == seed) return it.digit }
+        var cur = raw(seed)
+        if (seed > 0L && depth < MAX_LOOKBACK && cur == effectiveDigit(seed - 1, depth + 1)) {
+            cur = next(cur)
+        }
+        cache = DigitCache(seed, cur)
+        return cur
+    }
 
     private fun raw(seed: Long): Int {
         var z = seed + -7046029254386353131L
@@ -71,24 +93,7 @@ object FakeTime {
      */
     fun mask(text: CharSequence?, seed: Long): String {
         if (text.isNullOrEmpty()) return "$MIN_DIGIT$MIN_DIGIT"
-        return maskGuarded(text, seed, 0)
-    }
-
-    private fun maskGuarded(text: CharSequence, seed: Long, depth: Int): String {
-        val cur = rawMask(text, seed)
-        if (seed <= 0L || depth >= MAX_LOOKBACK) return cur
-        val prev = maskGuarded(text, seed - 1, depth + 1)
-        if (cur != prev) return cur
-        var cand = cur
-        repeat(DIGIT_SPAN) {
-            cand = bumpAllDigits(cand)
-            if (cand != prev) return cand
-        }
-        return cand
-    }
-
-    private fun rawMask(text: CharSequence, seed: Long): String {
-        val v = raw(seed)
+        val v = effectiveDigit(seed)
         val sb = StringBuilder(text.length)
         for (i in text.indices) {
             val c = text[i]
@@ -97,15 +102,7 @@ object FakeTime {
         return sb.toString()
     }
 
-    /** 整串数字一起顺移（6→7→8→9→6），保持"四位全同"的形态。 */
-    private fun bumpAllDigits(s: String): String {
-        val sb = StringBuilder(s.length)
-        for (c in s) {
-            sb.append(if (c in '0'..'9') ('0' + next(c - '0')) else c)
-        }
-        return sb.toString()
-    }
-
+    /** 6→7→8→9→6，撞车时整组顺移一位。 */
     private fun next(v: Int): Int = MIN_DIGIT + (v - MIN_DIGIT + 1) % DIGIT_SPAN
 
     /** 固定的两位假数字，用于只知道"这是 1~2 位数字段"、但拿不到原值的兜底场合。 */

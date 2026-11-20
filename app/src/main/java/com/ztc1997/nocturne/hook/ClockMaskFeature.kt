@@ -7,7 +7,6 @@ import com.ztc1997.nocturne.core.ConfigSnapshot
 import com.ztc1997.nocturne.core.FakeTime
 import com.ztc1997.nocturne.core.GLog
 import io.github.libxposed.api.XposedInterface
-import java.util.Calendar
 
 /**
  * 时间屏蔽判定 + 占位符替换。
@@ -180,16 +179,13 @@ class ClockMaskFeature(
      */
     private fun writeMask(tv: TextView, hint: String) {
         val seed = FakeTime.minuteSeed(System.currentTimeMillis())
-        val cal = Calendar.getInstance()
-        val hour = String.format("%02d", cal.get(Calendar.HOUR_OF_DAY))
-        val minute = String.format("%02d", cal.get(Calendar.MINUTE))
-        val orig = when {
-            hint.contains("hour", true) -> hour
-            hint.contains("minute", true) || hint.contains("min", true) -> minute
+        // 假时间只依赖分钟种子，不需要真实时分：用等长数字段保持 TextView 排版不变。
+        val masked = when {
+            hint.contains("hour", true) -> FakeTime.twoDigits(seed)
+            hint.contains("minute", true) || hint.contains("min", true) -> FakeTime.twoDigits(seed)
             hint.contains("colon", true) -> ":"
-            else -> "$hour:$minute"
+            else -> FakeTime.mask("00:00", seed)
         }
-        val masked = FakeTime.mask(orig, seed)
         if (tv.text?.toString() != masked) tv.text = masked
     }
 
